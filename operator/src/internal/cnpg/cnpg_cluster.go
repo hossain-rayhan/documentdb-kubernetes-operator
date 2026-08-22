@@ -17,26 +17,36 @@ import (
 
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
 	otelcfg "github.com/documentdb/documentdb-operator/internal/otel"
+	"github.com/documentdb/documentdb-operator/internal/product"
 	util "github.com/documentdb/documentdb-operator/internal/utils"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
+// GetCnpgClusterSpec renders the Cluster for a DocumentDB instance. The
+// documentdbImage argument overrides the resolved extension image; pass "" to
+// use the image resolved from the instance. Retained for callers that supply an
+// explicit extension image.
 func GetCnpgClusterSpec(req ctrl.Request, documentdb *dbpreview.DocumentDB, documentdbImage, serviceAccountName, storageClass string, isPrimaryRegion bool, log logr.Logger) *cnpgv1.Cluster {
+	intent := product.DocumentDBAdapter{}.ToClusterIntent(documentdb)
+	if documentdbImage != "" {
+		intent.Images.PostgresExtension = documentdbImage
+	}
+	return GetCnpgClusterSpecFromIntent(req, documentdb, intent, serviceAccountName, storageClass, isPrimaryRegion, log)
+}
+
+// GetCnpgClusterSpecFromIntent renders a CNPG Cluster from a product-neutral
+// ClusterIntent. This is the seam the reconciler drives: product-varying values
+// (images, credential secret, plugin name) come from the intent rather than from
+// product-specific lookups.
+func GetCnpgClusterSpecFromIntent(req ctrl.Request, documentdb *dbpreview.DocumentDB, intent product.ClusterIntent, serviceAccountName, storageClass string, isPrimaryRegion bool, log logr.Logger) *cnpgv1.Cluster {
 	split := ComputeResourceSplit(documentdb, DefaultSplitConfig())
 
-	sidecarPluginName := pluginsSidecarInjectorName(documentdb)
-	if sidecarPluginName == "" {
-		sidecarPluginName = util.DEFAULT_SIDECAR_INJECTOR_PLUGIN
-	}
+	sidecarPluginName := intent.SidecarInjectorPlugin
 
-	// Get the gateway image for this DocumentDB instance
-	gatewayImage := util.GetGatewayImageForDocumentDB(documentdb)
+	gatewayImage := intent.Images.Gateway
 	log.Info("Creating CNPG cluster with gateway image", "gatewayImage", gatewayImage, "documentdbName", documentdb.Name, "specGatewayImage", imageGateway(documentdb))
 
-	credentialSecretName := documentdb.Spec.DocumentDbCredentialSecret
-	if credentialSecretName == "" {
-		credentialSecretName = util.DEFAULT_DOCUMENTDB_CREDENTIALS_SECRET
-	}
+	credentialSecretName := intent.CredentialSecret
 
 	// Configure storage class - use specified storage class or nil for default
 	var storageClassPointer *string
@@ -48,7 +58,7 @@ func GetCnpgClusterSpec(req ctrl.Request, documentdb *dbpreview.DocumentDB, docu
 	// This addresses the fact that ImageVolume sources DO support pull policies
 	// (via corev1.ImageVolumeSource.PullPolicy), unlike regular container images
 	// which only support pull policies on container specs.
-	extensionImageSource := corev1.ImageVolumeSource{Reference: documentdbImage}
+	extensionImageSource := corev1.ImageVolumeSource{Reference: intent.Images.PostgresExtension}
 	if pullPolicy := parsePullPolicy(os.Getenv(util.DOCUMENTDB_IMAGE_PULL_POLICY_ENV)); pullPolicy != "" {
 		extensionImageSource.PullPolicy = pullPolicy
 	}
@@ -59,10 +69,10 @@ func GetCnpgClusterSpec(req ctrl.Request, documentdb *dbpreview.DocumentDB, docu
 			Namespace: req.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion:         documentdb.APIVersion,
-					Kind:               documentdb.Kind,
-					Name:               documentdb.Name,
-					UID:                documentdb.UID,
+					APIVersion:         intent.Identity.APIVersion,
+					Kind:               intent.Identity.Kind,
+					Name:               intent.Identity.Name,
+					UID:                intent.Identity.UID,
 					Controller:         &[]bool{true}[0], // This cluster is controlled by the DocumentDB instance
 					BlockOwnerDeletion: &[]bool{true}[0], // Block DocumentDB deletion until cluster is deleted
 				},
@@ -70,15 +80,15 @@ func GetCnpgClusterSpec(req ctrl.Request, documentdb *dbpreview.DocumentDB, docu
 		},
 		Spec: func() cnpgv1.ClusterSpec {
 			spec := cnpgv1.ClusterSpec{
-				Instances:           documentdb.Spec.InstancesPerNode,
-				ImageName:           imagePostgres(documentdb),
-				ImagePullSecrets:    toCNPGImagePullSecrets(documentdb.Spec.ImagePullSecrets),
+				Instances:           intent.Topology.Instances,
+				ImageName:           intent.Images.Postgres,
+				ImagePullSecrets:    toCNPGImagePullSecrets(intent.Images.PullSecrets),
 				PrimaryUpdateMethod: cnpgv1.PrimaryUpdateMethodSwitchover,
 				StorageConfiguration: cnpgv1.StorageConfiguration{
 					StorageClass: storageClassPointer, // Use configured storage class or default
-					Size:         documentdb.Spec.Resource.Storage.PvcSize,
+					Size:         intent.Storage.PvcSize,
 				},
-				InheritedMetadata: getInheritedMetadataLabels(documentdb.Name),
+				InheritedMetadata: getInheritedMetadataLabels(intent.Identity.Name),
 				Plugins: func() []cnpgv1.PluginConfiguration {
 					params := map[string]string{
 						"gatewayImage":               gatewayImage,
@@ -124,7 +134,7 @@ func GetCnpgClusterSpec(req ctrl.Request, documentdb *dbpreview.DocumentDB, docu
 					}}
 				}(),
 				PostgresConfiguration: buildPostgresConfiguration(documentdb, extensionImageSource, split.PostgresMemoryBytes),
-				Bootstrap:             getBootstrapConfiguration(documentdb, isPrimaryRegion, log),
+				Bootstrap:             bootstrapConfigurationFromIntent(intent, isPrimaryRegion, log),
 				LogLevel:              cmp.Or(documentdb.Spec.LogLevel, "info"),
 				Certificates:          postgresCertificates(documentdb),
 				Backup: &cnpgv1.BackupConfiguration{
@@ -133,12 +143,12 @@ func GetCnpgClusterSpec(req ctrl.Request, documentdb *dbpreview.DocumentDB, docu
 					},
 					Target: cnpgv1.BackupTarget("primary"),
 				},
-				Affinity:  documentdb.Spec.Affinity,
+				Affinity:  intent.Topology.Affinity,
 				Resources: buildResourceRequirements(split.Postgres),
 			}
 			spec.MaxStopDelay = getMaxStopDelayOrDefault(documentdb)
-			applyPostgresProcessIdentity(&spec, documentdb)
-			applyIOUringSeccomp(&spec, documentdb)
+			applyPostgresProcessIdentity(&spec, intent)
+			applyIOUringSeccomp(&spec, intent)
 
 			return spec
 		}(),
@@ -160,28 +170,27 @@ func getInheritedMetadataLabels(appName string) *cnpgv1.EmbeddedObjectMetadata {
 	}
 }
 
-func getBootstrapConfiguration(documentdb *dbpreview.DocumentDB, isPrimaryRegion bool, log logr.Logger) *cnpgv1.BootstrapConfiguration {
-	if isPrimaryRegion && documentdb.Spec.Bootstrap != nil && documentdb.Spec.Bootstrap.Recovery != nil {
-		recovery := documentdb.Spec.Bootstrap.Recovery
+func bootstrapConfigurationFromIntent(intent product.ClusterIntent, isPrimaryRegion bool, log logr.Logger) *cnpgv1.BootstrapConfiguration {
+	if isPrimaryRegion && intent.Bootstrap.Recovery != nil {
+		recovery := intent.Bootstrap.Recovery
 
 		// Handle backup recovery
-		if recovery.Backup.Name != "" {
-			backupName := recovery.Backup.Name
-			log.Info("DocumentDB cluster will be bootstrapped from backup", "backupName", backupName)
+		if recovery.BackupName != "" {
+			log.Info("DocumentDB cluster will be bootstrapped from backup", "backupName", recovery.BackupName)
 			return &cnpgv1.BootstrapConfiguration{
 				Recovery: &cnpgv1.BootstrapRecovery{
 					Backup: &cnpgv1.BackupSource{
-						LocalObjectReference: recovery.Backup,
+						LocalObjectReference: cnpgv1.LocalObjectReference{Name: recovery.BackupName},
 					},
 				},
 			}
 		}
 
 		// Handle PV recovery (via temporary PVC created by the controller)
-		if recovery.PersistentVolume != nil && recovery.PersistentVolume.Name != "" {
-			tempPVCName := util.TempPVCNameForPVRecovery(documentdb.Name)
+		if recovery.PersistentVolumeName != "" {
+			tempPVCName := util.TempPVCNameForPVRecovery(intent.Identity.Name)
 			log.Info("DocumentDB cluster will be bootstrapped from PV via temp PVC",
-				"pvName", recovery.PersistentVolume.Name, "tempPVC", tempPVCName)
+				"pvName", recovery.PersistentVolumeName, "tempPVC", tempPVCName)
 			return &cnpgv1.BootstrapConfiguration{
 				Recovery: &cnpgv1.BootstrapRecovery{
 					VolumeSnapshots: &cnpgv1.DataSource{
@@ -196,23 +205,35 @@ func getBootstrapConfiguration(documentdb *dbpreview.DocumentDB, isPrimaryRegion
 		}
 	}
 
-	return getDefaultBootstrapConfiguration(documentdb)
+	return defaultBootstrapConfigurationFromIntent(intent)
 }
 
-func getDefaultBootstrapConfiguration(documentdb *dbpreview.DocumentDB) *cnpgv1.BootstrapConfiguration {
+// getBootstrapConfiguration adapts a DocumentDB instance onto the intent-based
+// bootstrap builder. Retained for direct callers that hold the custom resource.
+func getBootstrapConfiguration(documentdb *dbpreview.DocumentDB, isPrimaryRegion bool, log logr.Logger) *cnpgv1.BootstrapConfiguration {
+	return bootstrapConfigurationFromIntent(product.DocumentDBAdapter{}.ToClusterIntent(documentdb), isPrimaryRegion, log)
+}
+
+func defaultBootstrapConfigurationFromIntent(intent product.ClusterIntent) *cnpgv1.BootstrapConfiguration {
 	postInitSQL := []string{
 		"CREATE EXTENSION documentdb CASCADE",
 		"CREATE ROLE documentdb WITH LOGIN PASSWORD 'Admin100'",
 		"ALTER ROLE documentdb WITH SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS",
 	}
-	if documentdb != nil && documentdb.Spec.Postgres != nil && len(documentdb.Spec.Postgres.PostInitSQL) > 0 {
-		postInitSQL = append(postInitSQL, documentdb.Spec.Postgres.PostInitSQL...)
+	if len(intent.Postgres.PostInitSQL) > 0 {
+		postInitSQL = append(postInitSQL, intent.Postgres.PostInitSQL...)
 	}
 	return &cnpgv1.BootstrapConfiguration{
 		InitDB: &cnpgv1.BootstrapInitDB{
 			PostInitSQL: postInitSQL,
 		},
 	}
+}
+
+// getDefaultBootstrapConfiguration adapts a DocumentDB instance onto the
+// intent-based default bootstrap builder. Retained for direct callers.
+func getDefaultBootstrapConfiguration(documentdb *dbpreview.DocumentDB) *cnpgv1.BootstrapConfiguration {
+	return defaultBootstrapConfigurationFromIntent(product.DocumentDBAdapter{}.ToClusterIntent(documentdb))
 }
 
 // getMaxStopDelayOrDefault returns StopDelay if set, otherwise util.CNPG_DEFAULT_STOP_DELAY
@@ -289,15 +310,6 @@ func parsePullPolicy(value string) corev1.PullPolicy {
 	}
 }
 
-// imagePostgres returns spec.image.postgres or empty string when unset.
-// Nil-safe.
-func imagePostgres(documentdb *dbpreview.DocumentDB) string {
-	if documentdb == nil || documentdb.Spec.Image == nil {
-		return ""
-	}
-	return documentdb.Spec.Image.Postgres
-}
-
 // imageGateway returns spec.image.gateway or empty string when unset.
 // Nil-safe.
 func imageGateway(documentdb *dbpreview.DocumentDB) string {
@@ -305,15 +317,6 @@ func imageGateway(documentdb *dbpreview.DocumentDB) string {
 		return ""
 	}
 	return documentdb.Spec.Image.Gateway
-}
-
-// pluginsSidecarInjectorName returns spec.plugins.sidecarInjectorName
-// or empty string when unset. Nil-safe.
-func pluginsSidecarInjectorName(documentdb *dbpreview.DocumentDB) string {
-	if documentdb == nil || documentdb.Spec.Plugins == nil {
-		return ""
-	}
-	return documentdb.Spec.Plugins.SidecarInjectorName
 }
 
 func postgresCertificates(documentdb *dbpreview.DocumentDB) *cnpgv1.CertificatesConfiguration {
@@ -344,16 +347,12 @@ func toCNPGImagePullSecrets(secrets []corev1.LocalObjectReference) []cnpgv1.Loca
 // applyPostgresProcessIdentity wires spec.postgres.uid / spec.postgres.gid
 // onto the CNPG ClusterSpec. CNPG validates that both are set together;
 // the CRD enforces the same invariant via XValidation on PostgresSpec.
-func applyPostgresProcessIdentity(spec *cnpgv1.ClusterSpec, documentdb *dbpreview.DocumentDB) {
-	if documentdb == nil || documentdb.Spec.Postgres == nil {
-		return
+func applyPostgresProcessIdentity(spec *cnpgv1.ClusterSpec, intent product.ClusterIntent) {
+	if intent.Postgres.UID != nil {
+		spec.PostgresUID = *intent.Postgres.UID
 	}
-	pg := documentdb.Spec.Postgres
-	if pg.UID != nil {
-		spec.PostgresUID = *pg.UID
-	}
-	if pg.GID != nil {
-		spec.PostgresGID = *pg.GID
+	if intent.Postgres.GID != nil {
+		spec.PostgresGID = *intent.Postgres.GID
 	}
 }
 
@@ -369,8 +368,8 @@ func applyPostgresProcessIdentity(spec *cnpgv1.ClusterSpec, documentdb *dbprevie
 // node that runs postgres pods (see the io-uring feature playground).
 //
 // No-op when the gate is disabled, so CNPG keeps its RuntimeDefault.
-func applyIOUringSeccomp(spec *cnpgv1.ClusterSpec, documentdb *dbpreview.DocumentDB) {
-	if !dbpreview.IsFeatureGateEnabled(documentdb, dbpreview.FeatureGateIOUring) {
+func applyIOUringSeccomp(spec *cnpgv1.ClusterSpec, intent product.ClusterIntent) {
+	if !intent.FeatureGates.IOUring {
 		return
 	}
 	profile := cmp.Or(os.Getenv(util.IOURING_SECCOMP_PROFILE_ENV), util.DEFAULT_IOURING_SECCOMP_PROFILE)

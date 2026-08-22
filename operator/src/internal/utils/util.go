@@ -421,57 +421,63 @@ func GenerateConnectionString(documentdb *dbpreview.DocumentDB, serviceIp string
 	return conn + "&replicaSet=rs0"
 }
 
+// ResolveComponentImage applies the shared image-resolution priority used for
+// both the extension and gateway images: an explicit image wins, then a
+// spec-level version, then an environment-provided version, then the
+// change-stream override, and finally the product default. Every product-varying
+// value (repo, default, env version, change-stream image) is supplied by the
+// caller so this function stays product-neutral and serves any product profile.
+func ResolveComponentImage(repo, defaultImage, explicitImage, specVersion, envVersion, changeStreamImage string, changeStreamEnabled bool) string {
+	if explicitImage != "" {
+		return explicitImage
+	}
+	if specVersion != "" {
+		return fmt.Sprintf("%s:%s", repo, specVersion)
+	}
+	if envVersion != "" {
+		return fmt.Sprintf("%s:%s", repo, envVersion)
+	}
+	// TODO: remove this override once change stream support is included in the official images.
+	if changeStreamEnabled {
+		return changeStreamImage
+	}
+	return defaultImage
+}
+
 // GetGatewayImageForDocumentDB returns the gateway image for a DocumentDB instance.
 // Priority: spec.image.gateway > spec.documentDBVersion > env.DOCUMENTDB_VERSION > default
 func GetGatewayImageForDocumentDB(documentdb *dbpreview.DocumentDB) string {
-	if documentdb.Spec.Image != nil && documentdb.Spec.Image.Gateway != "" {
-		return documentdb.Spec.Image.Gateway
+	var explicit string
+	if documentdb.Spec.Image != nil {
+		explicit = documentdb.Spec.Image.Gateway
 	}
-
-	// Use spec-level documentDBVersion if set
-	if documentdb.Spec.DocumentDBVersion != "" {
-		return fmt.Sprintf("%s:%s", GATEWAY_IMAGE_REPO, documentdb.Spec.DocumentDBVersion)
-	}
-
-	// Use global documentDbVersion if set
-	if version := os.Getenv(DOCUMENTDB_VERSION_ENV); version != "" {
-		return fmt.Sprintf("%s:%s", GATEWAY_IMAGE_REPO, version)
-	}
-
-	// Use changestream-enabled image when the ChangeStreams feature gate is on.
-	// TODO: remove this override once change stream support is included in the official images.
-	if dbpreview.IsFeatureGateEnabled(documentdb, dbpreview.FeatureGateChangeStreams) {
-		return CHANGESTREAM_GATEWAY_IMAGE
-	}
-
-	// Fall back to default
-	return DEFAULT_GATEWAY_IMAGE
+	return ResolveComponentImage(
+		GATEWAY_IMAGE_REPO,
+		DEFAULT_GATEWAY_IMAGE,
+		explicit,
+		documentdb.Spec.DocumentDBVersion,
+		os.Getenv(DOCUMENTDB_VERSION_ENV),
+		CHANGESTREAM_GATEWAY_IMAGE,
+		dbpreview.IsFeatureGateEnabled(documentdb, dbpreview.FeatureGateChangeStreams),
+	)
 }
 
 // GetDocumentDBImageForInstance returns the documentdb engine image.
 // Priority: spec.image.documentDB > spec.documentDBVersion > env.DOCUMENTDB_VERSION > default
 func GetDocumentDBImageForInstance(documentdb *dbpreview.DocumentDB) string {
-	if documentdb.Spec.Image != nil && documentdb.Spec.Image.DocumentDB != "" {
-		return documentdb.Spec.Image.DocumentDB
+	var explicit string
+	if documentdb.Spec.Image != nil {
+		explicit = documentdb.Spec.Image.DocumentDB
 	}
-
-	// Use spec-level documentDBVersion if set
-	if documentdb.Spec.DocumentDBVersion != "" {
-		return fmt.Sprintf("%s:%s", DOCUMENTDB_EXTENSION_IMAGE_REPO, documentdb.Spec.DocumentDBVersion)
-	}
-
-	// Use global documentDbVersion if set (from DOCUMENTDB_VERSION env var)
-	if version := os.Getenv(DOCUMENTDB_VERSION_ENV); version != "" {
-		return fmt.Sprintf("%s:%s", DOCUMENTDB_EXTENSION_IMAGE_REPO, version)
-	}
-
-	// Use changestream-enabled image when the ChangeStreams feature gate is on.
-	// TODO: remove this override once change stream support is included in the official images.
-	if dbpreview.IsFeatureGateEnabled(documentdb, dbpreview.FeatureGateChangeStreams) {
-		return CHANGESTREAM_DOCUMENTDB_IMAGE
-	}
-
-	return DEFAULT_DOCUMENTDB_IMAGE
+	return ResolveComponentImage(
+		DOCUMENTDB_EXTENSION_IMAGE_REPO,
+		DEFAULT_DOCUMENTDB_IMAGE,
+		explicit,
+		documentdb.Spec.DocumentDBVersion,
+		os.Getenv(DOCUMENTDB_VERSION_ENV),
+		CHANGESTREAM_DOCUMENTDB_IMAGE,
+		dbpreview.IsFeatureGateEnabled(documentdb, dbpreview.FeatureGateChangeStreams),
+	)
 }
 
 func GenerateServiceName(source, target, resourceGroup string) string {
