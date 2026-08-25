@@ -444,42 +444,6 @@ func ResolveComponentImage(repo, defaultImage, explicitImage, specVersion, envVe
 	return defaultImage
 }
 
-// GetGatewayImageForDocumentDB returns the gateway image for a DocumentDB instance.
-// Priority: spec.image.gateway > spec.documentDBVersion > env.DOCUMENTDB_VERSION > default
-func GetGatewayImageForDocumentDB(documentdb *dbpreview.DocumentDB) string {
-	var explicit string
-	if documentdb.Spec.Image != nil {
-		explicit = documentdb.Spec.Image.Gateway
-	}
-	return ResolveComponentImage(
-		GATEWAY_IMAGE_REPO,
-		DEFAULT_GATEWAY_IMAGE,
-		explicit,
-		documentdb.Spec.DocumentDBVersion,
-		os.Getenv(DOCUMENTDB_VERSION_ENV),
-		CHANGESTREAM_GATEWAY_IMAGE,
-		dbpreview.IsFeatureGateEnabled(documentdb, dbpreview.FeatureGateChangeStreams),
-	)
-}
-
-// GetDocumentDBImageForInstance returns the documentdb engine image.
-// Priority: spec.image.documentDB > spec.documentDBVersion > env.DOCUMENTDB_VERSION > default
-func GetDocumentDBImageForInstance(documentdb *dbpreview.DocumentDB) string {
-	var explicit string
-	if documentdb.Spec.Image != nil {
-		explicit = documentdb.Spec.Image.DocumentDB
-	}
-	return ResolveComponentImage(
-		DOCUMENTDB_EXTENSION_IMAGE_REPO,
-		DEFAULT_DOCUMENTDB_IMAGE,
-		explicit,
-		documentdb.Spec.DocumentDBVersion,
-		os.Getenv(DOCUMENTDB_VERSION_ENV),
-		CHANGESTREAM_DOCUMENTDB_IMAGE,
-		dbpreview.IsFeatureGateEnabled(documentdb, dbpreview.FeatureGateChangeStreams),
-	)
-}
-
 func GenerateServiceName(source, target, resourceGroup string) string {
 	name := fmt.Sprintf("%s-%s", source, target)
 	diff := 63 - len(name) - len(resourceGroup) - 2

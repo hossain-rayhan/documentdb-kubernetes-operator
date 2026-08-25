@@ -37,9 +37,11 @@ type ProductProfile struct {
 	WALReplicaPlugin      string
 }
 
-// Adapter translates a product-specific custom resource into the product-neutral
-// model the reconciler operates on: a static Profile plus a ClusterIntent built
-// from the custom resource.
+// Adapter is the product-neutral contract shared by every product integration:
+// it exposes the product's static Profile. Each concrete adapter (for example
+// DocumentDBAdapter) also provides a typed ToClusterIntent for its own custom
+// resource; that method is not on this interface because the custom-resource
+// type is product-specific.
 type Adapter interface {
 	// Profile returns the static product profile.
 	Profile() ProductProfile

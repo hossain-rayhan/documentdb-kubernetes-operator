@@ -22,6 +22,7 @@ import (
 
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
 	"github.com/documentdb/documentdb-operator/internal/cnpg"
+	"github.com/documentdb/documentdb-operator/internal/product"
 	util "github.com/documentdb/documentdb-operator/internal/utils"
 )
 
@@ -505,7 +506,7 @@ func resolveEffectiveBinaryVersion(db *dbpreview.DocumentDB) string {
 	// helper, and read its semver tag. Anything without a parseable semver tag
 	// (a digest, or the changestream image) stays unknown so the restore is warned,
 	// not falsely blocked — keeping the webhook in step with the controller.
-	image := util.GetDocumentDBImageForInstance(db)
+	image := product.DocumentDBAdapter{}.ExtensionImage(db)
 	if tagIdx := strings.LastIndex(image, ":"); tagIdx >= 0 {
 		if semver := extractSemver(image[tagIdx+1:]); semver != "" {
 			return semver
