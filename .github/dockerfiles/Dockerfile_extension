@@ -31,9 +31,14 @@ RUN set -eux && \
         postgresql-${PG_MAJOR}-pgvector \
         postgresql-${PG_MAJOR}-postgis-3
 
-# Install the DocumentDB extension from a pre-built .deb
+# Install the DocumentDB extension via apt (not dpkg -i) so its
+# dependencies (e.g. rum) resolve, then verify the installed version.
 COPY ${DEB_PACKAGE_REL_PATH} /tmp/documentdb.deb
-RUN dpkg -i /tmp/documentdb.deb && \
+RUN set -eux && \
+    DEB_VERSION=$(dpkg-deb -f /tmp/documentdb.deb Version) && \
+    apt-get install -y --no-install-recommends /tmp/documentdb.deb && \
+    INSTALLED_VERSION=$(dpkg-query -W -f='${Version}' "postgresql-${PG_MAJOR}-documentdb") && \
+    test "$INSTALLED_VERSION" = "$DEB_VERSION" && \
     rm -f /tmp/documentdb.deb
 
 # Gather system library dependencies not present in the CNPG base image

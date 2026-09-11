@@ -1,7 +1,8 @@
 name: RELEASE - Build DocumentDB Candidate Images
 
-# Builds documentdb extension and gateway images from public DocumentDB release artifacts.
-# - documentdb image: public deb13 PostgreSQL 18 extension package
+# Builds documentdb extension and gateway images from published DocumentDB artifacts.
+# - documentdb image: Debian 13 (trixie) PostgreSQL 18 extension package from the
+#   PGDG APT repository (apt.postgresql.org)
 # - gateway image: public documentdb-local image payload
 # These images follow the DATABASE version track (documentDbVersion in values.yaml).
 # For operator/sidecar images, see build_operator_images.yml.
@@ -13,10 +14,14 @@ on:
         description: 'Released DocumentDB version to package (for example 0.113.0)'
         required: false
         default: '0.113.0'
-      documentdb_extension_github_repo:
-        description: 'GitHub owner/repo for DocumentDB extension releases'
+      documentdb_apt_base_url:
+        description: 'Base URL of the APT repository serving the DocumentDB extension package'
         required: false
-        default: 'documentdb/documentdb'
+        default: 'https://apt.postgresql.org/pub/repos/apt'
+      documentdb_apt_suite:
+        description: 'APT suite (distribution) to resolve the Debian 13 package from'
+        required: false
+        default: 'trixie-pgdg'
       documentdb_gateway_image_repo:
         description: 'Container image repo for gateway source (without tag)'
         required: false
@@ -33,7 +38,10 @@ permissions:
 env:
 
   DEFAULT_DOCUMENTDB_VERSION: '0.113.0'
-  DOCUMENTDB_EXTENSION_GITHUB_REPO: ${{ github.event.inputs.documentdb_extension_github_repo || 'documentdb/documentdb' }}
+  DOCUMENTDB_PG_MAJOR: '18'
+  DOCUMENTDB_APT_BASE_URL: ${{ github.event.inputs.documentdb_apt_base_url || 'https://apt.postgresql.org/pub/repos/apt' }}
+  DOCUMENTDB_APT_SUITE: ${{ github.event.inputs.documentdb_apt_suite || 'trixie-pgdg' }}
+  DOCUMENTDB_APT_COMPONENT: 'main'
   DOCUMENTDB_GATEWAY_IMAGE_REPO: ${{ github.event.inputs.documentdb_gateway_image_repo || 'ghcr.io/documentdb/documentdb/documentdb-local' }}
 
 
@@ -48,6 +56,8 @@ jobs:
       documentdb_version: ${{ steps.version.outputs.documentdb_version }}
       documentdb_version_dash: ${{ steps.version.outputs.documentdb_version_dash }}
       image_tag: ${{ steps.version.outputs.image_tag }}
+      extension_packages: ${{ steps.extension.outputs.extension_packages }}
+      extension_deb_version: ${{ steps.extension.outputs.extension_deb_version }}
       gateway_source_image: ${{ steps.version.outputs.gateway_source_image }}
     steps:
     - name: Resolve released DocumentDB version
@@ -75,20 +85,88 @@ jobs:
           echo "gateway_source_image=$GATEWAY_SOURCE_IMAGE"
         } >> "$GITHUB_OUTPUT"
         echo "DocumentDB version: $VERSION"
-        echo "Release tag: v$VERSION_DASH"
+        echo "Extension package version: $VERSION_DASH"
         echo "Candidate image tag: $IMAGE_TAG"
         echo "Gateway source image: $GATEWAY_SOURCE_IMAGE"
 
-    - name: Verify public extension release assets
+    # Pin one package version (and SHA256) for both arches before any image build.
+    - name: Resolve extension package in APT repository
+      id: extension
       env:
+        PACKAGE: postgresql-${{ env.DOCUMENTDB_PG_MAJOR }}-documentdb
         VERSION_DASH: ${{ steps.version.outputs.documentdb_version_dash }}
+      shell: bash
       run: |
         set -euo pipefail
-        for ARCH in amd64 arm64; do
-          ASSET_URL="https://github.com/${{ env.DOCUMENTDB_EXTENSION_GITHUB_REPO }}/releases/download/v${VERSION_DASH}/deb13-postgresql-18-documentdb_${VERSION_DASH}_${ARCH}.deb"
-          echo "Checking $ASSET_URL"
-          curl -fsI -L "$ASSET_URL" >/dev/null
-        done
+        python3 - <<'PY'
+        import gzip
+        import json
+        import os
+        import subprocess
+        import urllib.request
+
+        base = os.environ["DOCUMENTDB_APT_BASE_URL"].rstrip("/")
+        suite = os.environ["DOCUMENTDB_APT_SUITE"]
+        component = os.environ["DOCUMENTDB_APT_COMPONENT"]
+        package = os.environ["PACKAGE"]
+        upstream = os.environ["VERSION_DASH"]
+
+
+        def is_newer(candidate, current):
+            return subprocess.call(
+                ["dpkg", "--compare-versions", candidate, "gt", current]
+            ) == 0
+
+
+        resolved = {}
+        for arch in ("amd64", "arm64"):
+            index_url = f"{base}/dists/{suite}/{component}/binary-{arch}/Packages.gz"
+            print(f"Reading {index_url}")
+            with urllib.request.urlopen(index_url, timeout=120) as response:
+                index = gzip.decompress(response.read()).decode("utf-8", "replace")
+
+            best = None
+            for stanza in index.split("\n\n"):
+                fields = {}
+                for line in stanza.splitlines():
+                    if line.startswith((" ", "\t")) or ":" not in line:
+                        continue
+                    key, _, value = line.partition(":")
+                    fields[key] = value.strip()
+
+                if fields.get("Package") != package:
+                    continue
+
+                # PGDG appends a packaging revision (0.116-0 -> 0.116-0-1.pgdg13+1).
+                version = fields.get("Version", "")
+                if version != upstream and not version.startswith(f"{upstream}-"):
+                    continue
+
+                if best is None or is_newer(version, best["version"]):
+                    best = {
+                        "version": version,
+                        "url": f"{base}/{fields['Filename']}",
+                        "sha256": fields["SHA256"],
+                    }
+
+            if best is None:
+                raise SystemExit(
+                    f"{package} {upstream} is not published for {arch} in "
+                    f"{suite}/{component} at {base}"
+                )
+            print(f"  {arch}: {best['version']} -> {best['url']}")
+            resolved[arch] = best
+
+        versions = {entry["version"] for entry in resolved.values()}
+        if len(versions) != 1:
+            raise SystemExit(
+                f"architectures resolved to different package versions: {sorted(versions)}"
+            )
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"extension_packages={json.dumps(resolved, separators=(',', ':'))}\n")
+            output.write(f"extension_deb_version={versions.pop()}\n")
+        PY
 
     - name: Verify public gateway source image
       env:
@@ -125,14 +203,51 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Download public extension package
+    - name: Download and validate extension package
       if: matrix.image.name == 'documentdb'
+      env:
+        PACKAGE: postgresql-${{ env.DOCUMENTDB_PG_MAJOR }}-documentdb
+        DEB_URL: ${{ fromJSON(needs.resolve-public-artifacts.outputs.extension_packages)[matrix.arch].url }}
+        DEB_SHA256: ${{ fromJSON(needs.resolve-public-artifacts.outputs.extension_packages)[matrix.arch].sha256 }}
+        DEB_VERSION: ${{ needs.resolve-public-artifacts.outputs.extension_deb_version }}
+        EXPECTED_SCHEMA_VERSION: ${{ needs.resolve-public-artifacts.outputs.documentdb_version_dash }}
+        EXPECTED_ARCH: ${{ matrix.arch }}
+      shell: bash
       run: |
         set -euo pipefail
         mkdir -p packages
-        DEB_FILE="deb13-postgresql-18-documentdb_${{ needs.resolve-public-artifacts.outputs.documentdb_version_dash }}_${{ matrix.arch }}.deb"
-        ASSET_URL="https://github.com/${{ env.DOCUMENTDB_EXTENSION_GITHUB_REPO }}/releases/download/v${{ needs.resolve-public-artifacts.outputs.documentdb_version_dash }}/${DEB_FILE}"
-        curl -fsSL -o "packages/${DEB_FILE}" -L "$ASSET_URL"
+        DEB_FILE="packages/${PACKAGE}_${DEB_VERSION}_${EXPECTED_ARCH}.deb"
+
+        echo "Downloading $DEB_URL"
+        curl -fsSL -o "$DEB_FILE" "$DEB_URL"
+        echo "${DEB_SHA256}  ${DEB_FILE}" | sha256sum -c -
+
+        PACKAGE_NAME=$(dpkg-deb -f "$DEB_FILE" Package)
+        PACKAGE_VERSION=$(dpkg-deb -f "$DEB_FILE" Version)
+        PACKAGE_ARCH=$(dpkg-deb -f "$DEB_FILE" Architecture)
+        [[ "$PACKAGE_NAME" == "$PACKAGE" ]] || {
+          echo "Unexpected package name: $PACKAGE_NAME" >&2
+          exit 1
+        }
+        [[ "$PACKAGE_VERSION" == "$DEB_VERSION" ]] || {
+          echo "Unexpected package version: $PACKAGE_VERSION" >&2
+          exit 1
+        }
+        [[ "$PACKAGE_ARCH" == "$EXPECTED_ARCH" ]] || {
+          echo "Unexpected package architecture: $PACKAGE_ARCH" >&2
+          exit 1
+        }
+
+        # Assert the extension schema version (Debian version may carry a packaging revision).
+        CONTROL_PATH="./usr/share/postgresql/${DOCUMENTDB_PG_MAJOR}/extension/documentdb.control"
+        SCHEMA_VERSION=$(dpkg-deb --fsys-tarfile "$DEB_FILE" | tar -xO "$CONTROL_PATH" |
+          sed -nE "s/^default_version[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p")
+        [[ "$SCHEMA_VERSION" == "$EXPECTED_SCHEMA_VERSION" ]] || {
+          echo "Package declares extension version '$SCHEMA_VERSION', expected '$EXPECTED_SCHEMA_VERSION'" >&2
+          exit 1
+        }
+
+        echo "DEB_PACKAGE_REL_PATH=$DEB_FILE" >> "$GITHUB_ENV"
         ls -lh packages/
 
     - name: Login to GHCR
@@ -148,9 +263,8 @@ jobs:
 
         case "${{ matrix.image.name }}" in
           documentdb)
-            DEB_FILE="deb13-postgresql-18-documentdb_${{ needs.resolve-public-artifacts.outputs.documentdb_version_dash }}_${{ matrix.arch }}.deb"
-            echo "Using deb: $DEB_FILE"
-            BUILD_ARGS="--build-arg PG_MAJOR=18 --build-arg DEB_PACKAGE_REL_PATH=packages/$DEB_FILE"
+            echo "Using deb: $DEB_PACKAGE_REL_PATH"
+            BUILD_ARGS="--build-arg PG_MAJOR=${{ env.DOCUMENTDB_PG_MAJOR }} --build-arg DEB_PACKAGE_REL_PATH=$DEB_PACKAGE_REL_PATH"
             ;;
           gateway)
             echo "Using public gateway source image: ${{ needs.resolve-public-artifacts.outputs.gateway_source_image }}"
@@ -221,7 +335,8 @@ jobs:
           echo ""
           echo "- **DocumentDB Version**: \`${{ needs.resolve-public-artifacts.outputs.documentdb_version }}\`"
           echo "- **Candidate Image Tag**: \`${{ needs.resolve-public-artifacts.outputs.image_tag }}\`"
-          echo "- **Extension Package Source**: \`https://github.com/${{ env.DOCUMENTDB_EXTENSION_GITHUB_REPO }}/releases/download/v${{ needs.resolve-public-artifacts.outputs.documentdb_version_dash }}/deb13-postgresql-18-documentdb_${{ needs.resolve-public-artifacts.outputs.documentdb_version_dash }}_{amd64,arm64}.deb\`"
+          echo "- **Extension Package**: \`postgresql-${{ env.DOCUMENTDB_PG_MAJOR }}-documentdb ${{ needs.resolve-public-artifacts.outputs.extension_deb_version }}\` (amd64, arm64)"
+          echo "- **Extension Package Source**: \`${{ env.DOCUMENTDB_APT_BASE_URL }} ${{ env.DOCUMENTDB_APT_SUITE }}/${{ env.DOCUMENTDB_APT_COMPONENT }}\`"
           echo "- **Gateway Source Image**: \`${{ needs.resolve-public-artifacts.outputs.gateway_source_image }}\`"
           echo "- **Images**: documentdb, gateway"
           echo ""

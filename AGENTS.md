@@ -75,7 +75,7 @@ The project uses **two independent version tracks** for container images:
 | **Database** | documentdb (extension), gateway | `values.yaml` → `documentDbVersion` | `0.113.0` |
 
 - Operator images are built from this repo's Go source
-- Database images are built from public `documentdb/documentdb` release artifacts (extension `.deb` + gateway payload from `documentdb-local`)
+- Database images are built from the PGDG `postgresql-18-documentdb` package (Debian 13) and the public `documentdb-local` gateway image
 - Each track has its own build and release workflows
 - Database image defaults are also hardcoded in `constants.go` and `config.go` as fallbacks
 

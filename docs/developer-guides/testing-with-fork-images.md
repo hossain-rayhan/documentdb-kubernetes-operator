@@ -7,7 +7,7 @@ It covers two independent image tracks — pick whichever you actually changed:
 | Track | What it ships | Repo to fork & build from | Workflow to run |
 |---|---|---|---|
 | **Operator track** | `operator`, `sidecar` | This repo (`documentdb/documentdb-kubernetes-operator`) | [`RELEASE - Build Operator Candidate Images`](../../.github/workflows/build_operator_images.yml) |
-| **Database track** | `documentdb` (extension), `gateway` | Upstream [`documentdb/documentdb`](https://github.com/documentdb/documentdb) **then** this repo | DocumentDB release pipeline → [`RELEASE - Build DocumentDB Candidate Images`](../../.github/workflows/build_documentdb_images.yml) |
+| **Database track** | `documentdb` (extension), `gateway` | Published packages/images (PGDG APT + upstream [`documentdb/documentdb`](https://github.com/documentdb/documentdb)) | [`RELEASE - Build DocumentDB Candidate Images`](../../.github/workflows/build_documentdb_images.yml) |
 
 If your change is purely Go controller code, skip Step 1 entirely and use the upstream `0.110.0` (or any released) database images.
 
@@ -24,24 +24,21 @@ If your change is purely Go controller code, skip Step 1 entirely and use the up
 
 ---
 
-## Step 1 — (Database track only) Build extension + gateway from a documentdb fork
+## Step 1 — (Database track only) Build the extension + gateway images
 
 Skip this step if you don't need to change the DocumentDB extension or gateway.
 
-1. **Fork** [`documentdb/documentdb`](https://github.com/documentdb/documentdb) and push your changes.
-2. **Run the DocumentDB release pipeline** on your fork (typically `Release` workflow). This must publish:
-    - A GitHub release named `v<MAJOR>.<MINOR>-<PATCH>` (note the dash before patch — for example `v0.110-0`).
-    - Per-arch `.deb` assets attached to that release: `deb13-postgresql-18-documentdb_<MAJOR>.<MINOR>-<PATCH>_amd64.deb` and `_arm64.deb`.
-    - A `documentdb-local` GHCR image: `ghcr.io/<your-gh-user>/documentdb/documentdb-local:pg17-<MAJOR>.<MINOR>.<PATCH>`.
+The workflow resolves `postgresql-18-documentdb` from [PGDG](https://apt.postgresql.org/) (`trixie-pgdg`) — no extension build needed. The gateway comes from an upstream `documentdb-local` image.
 
-    The operator-side workflow probes for these exact paths in [its verify steps](../../.github/workflows/build_documentdb_images.yml) (`Verify public extension release assets` and `Verify public gateway source image`).
+1. **In your operator fork**, run **Actions → `RELEASE - Build DocumentDB Candidate Images` → Run workflow**:
+    - `version`: the released DocumentDB version (e.g. `0.116.0`)
+    - `documentdb_gateway_image_repo`: override if using a forked gateway image
 
-3. **In your operator fork**, run **Actions → `RELEASE - Build DocumentDB Candidate Images` → Run workflow**. Provide these inputs:
-    - `version`: `0.110.0` (or whatever you released in step 2)
-    - `documentdb_extension_github_repo`: `<your-gh-user>/documentdb`
-    - `documentdb_gateway_image_repo`: `ghcr.io/<your-gh-user>/documentdb/documentdb-local`
+    The resolve step fails fast if the version is not published for both architectures.
 
-4. After the run finishes, your fork has the candidate tag (and per-arch variants):
+2. **For unreleased extension changes**, override `documentdb_apt_base_url` / `documentdb_apt_suite` to point at your own APT repository. The package must be named `postgresql-18-documentdb` with a matching `default_version`. For a custom gateway, publish a `documentdb-local` GHCR image from your fork and override `documentdb_gateway_image_repo`.
+
+3. After the run finishes, your fork has the candidate tag (and per-arch variants):
 
     ```text
     ghcr.io/<your-gh-user>/documentdb-kubernetes-operator/documentdb:<version>-build-<run_id>-<attempt>-<sha>

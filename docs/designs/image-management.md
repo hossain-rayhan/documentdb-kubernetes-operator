@@ -24,7 +24,7 @@ This document describes how the DocumentDB Kubernetes Operator manages, builds, 
 The project manages **5 container images** across two independent version tracks:
 
 - **Operator track**: images built from Go source code in this repository
-- **Database track**: images built from `.deb` packages produced by the upstream [`documentdb/documentdb`](https://github.com/documentdb/documentdb) repository
+- **Database track**: extension `.deb` from [PGDG](https://apt.postgresql.org/) (`trixie-pgdg`), gateway payload from the upstream [`documentdb/documentdb`](https://github.com/documentdb/documentdb) `documentdb-local` image
 
 All images are published to **GitHub Container Registry (GHCR)** under `ghcr.io/documentdb/documentdb-kubernetes-operator/`. A sixth image (PostgreSQL) comes from the CloudNative-PG project and is consumed as-is.
 
@@ -44,7 +44,7 @@ All images are published to **GitHub Container Registry (GHCR)** under `ghcr.io/
 
 | Image | GHCR Path | Source | Dockerfile | Purpose |
 |-------|-----------|--------|------------|---------|
-| **documentdb** | `.../documentdb` | Public `deb13` PostgreSQL 18 package from `documentdb/documentdb` releases | `.github/dockerfiles/Dockerfile_extension` | DocumentDB PostgreSQL extension files for CNPG ImageVolume mode |
+| **documentdb** | `.../documentdb` | `postgresql-18-documentdb` from the PGDG APT repository (`trixie-pgdg`) | `.github/dockerfiles/Dockerfile_extension` | DocumentDB PostgreSQL extension files for CNPG ImageVolume mode |
 | **gateway** | `.../gateway` | Public gateway payload copied from `ghcr.io/documentdb/documentdb/documentdb-local:pg17-<version>` | `.github/dockerfiles/Dockerfile_gateway_public_image` | MongoDB wire-protocol gateway binary (Rust) |
 
 ### External Image (Not Built Here)
@@ -199,7 +199,7 @@ Builds operator and sidecar images from this repo's Go source.
 
 ### Database Image Build (`build_documentdb_images.yml`)
 
-Builds documentdb extension and gateway images from public DocumentDB release artifacts.
+Builds documentdb extension and gateway images from published DocumentDB artifacts.
 
 | Aspect | Details |
 |--------|---------|
@@ -207,17 +207,23 @@ Builds documentdb extension and gateway images from public DocumentDB release ar
 | **Images** | documentdb, gateway |
 | **Dockerfiles** | `.github/dockerfiles/Dockerfile_extension`, `.github/dockerfiles/Dockerfile_gateway_public_image` |
 | **Tag pattern** | `{documentdb_version}-build-{run_id}-{attempt}-{sha}` (candidate) |
-| **Build time** | ~5 minutes (public artifact download + image build) |
+| **Build time** | ~5 minutes (package download + image build) |
 | **Multi-arch** | amd64 + arm64 → multi-arch manifest |
 | **Signing** | cosign keyless (OIDC) |
 | **Version detection** | Workflow input / repository dispatch payload (defaults to released `0.113.0`) |
 
 The build process:
-1. Resolves the released DocumentDB version to package
-2. Downloads the public `deb13` PostgreSQL 18 extension package from `documentdb/documentdb` release assets
-3. Verifies the public multi-arch `documentdb-local:pg17-<version>` image exists
-4. Builds `Dockerfile_extension` using the public extension `.deb` (installs pg_cron, pgvector, postgis alongside)
-5. Builds `Dockerfile_gateway_public_image` by copying the gateway binary and runtime files from the public upstream image
+1. Resolves the released DocumentDB version
+2. Pins `postgresql-18-documentdb` from the PGDG `trixie-pgdg` APT index (one version + SHA256 for both arches)
+3. Verifies the public `documentdb-local:pg17-<version>` image exists
+4. Downloads and validates each `.deb` (checksum, name, version, arch, `default_version`)
+5. Builds `Dockerfile_extension` (installs pg_cron, pgvector, postgis alongside)
+6. Builds `Dockerfile_gateway_public_image` from the upstream gateway payload
+
+> **Why PGDG?** Upstream stopped publishing Debian 13 `.deb` assets after `0.115`. PGDG publishes
+> the same package for `trixie` on both architectures. PGDG versions carry a packaging revision
+> (`0.116-0` → `0.116-0-1.pgdg13+1`), so the workflow resolves the index rather than constructing
+> a URL, and asserts `default_version` rather than relying on the Debian version string.
 
 ### Dockerfile Details
 

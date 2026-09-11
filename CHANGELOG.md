@@ -4,6 +4,7 @@
 
 ### Major Features
 - **Fail-fast ImageVolume capability check**: The operator now depends on the Kubernetes [ImageVolume](https://kubernetes.io/docs/concepts/storage/volumes/#image) feature to mount the DocumentDB extension into PostgreSQL pods. Instead of gating on a Kubernetes version number, the validating webhook performs a capability probe (a server-side dry-run) when a `DocumentDB` is created and **rejects the resource with an actionable error if ImageVolume is unavailable**, so you find out immediately instead of waiting for pods that never become ready. ImageVolume is GA (on by default) in Kubernetes **1.35+**; on **1.33/1.34** it is beta and must be enabled via the `ImageVolume` feature gate on a containerd/CRI-O runtime. The Helm chart's `kubeVersion` floor is relaxed to `>= 1.33.0-0` accordingly. See [Before you start](docs/operator-public-documentation/preview/getting-started/before-you-start.md).
+- **DocumentDB extension packages from PGDG**: The database image build now resolves `postgresql-18-documentdb` from the [PGDG APT repository](https://apt.postgresql.org/) (`trixie-pgdg`), pinning one version and SHA256 across both architectures and validating `default_version` before building. Replaces the upstream Debian 13 release assets that stopped being published after `0.115`.
 
 ## [0.3.0] - 2026-07-15
 
