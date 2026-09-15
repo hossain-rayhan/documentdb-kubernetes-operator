@@ -32,7 +32,7 @@ const (
 	envOldDocumentDBImage = "E2E_UPGRADE_OLD_DOCUMENTDB_IMAGE"
 	envNewDocumentDBImage = "E2E_UPGRADE_NEW_DOCUMENTDB_IMAGE"
 
-	// Old/new DocumentDB *versions* (e.g. "0.110.0" / "0.113.0") for the
+	// Old/new DocumentDB *versions* (e.g. "0.116.0" / "0.117.0") for the
 	// schema-upgrade spec. These drive spec.documentDBVersion — the
 	// user-facing knob that sets both the extension and gateway images
 	// together — rather than raw image overrides. The extension's
@@ -54,8 +54,8 @@ const (
 	// on each DocumentDB release (old <- previous default, new <- released
 	// version). Do not duplicate it into workflow env; test-e2e.yml only
 	// passes an optional workflow_dispatch override.
-	defaultOldDocumentDBVersion = "0.109.0"
-	defaultNewDocumentDBVersion = "0.110.0"
+	defaultOldDocumentDBVersion = "0.116.0"
+	defaultNewDocumentDBVersion = "0.117.0"
 
 	// Optional gateway image overrides for the image-upgrade spec.
 	// When unset the spec patches only spec.image.documentDB and leaves

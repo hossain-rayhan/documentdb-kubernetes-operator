@@ -168,13 +168,16 @@ type ImageSpec struct {
 	// use trixie (Debian 13) base to match the extension's GLIBC
 	// requirements.
 	//
-	// Pinned to the 18.4 minor tag instead of the floating
-	// "18-minimal-trixie" tag, which rolled 18.4 -> 18.6 on 2026-08-13 and
-	// crashed the DocumentDB 0.113.0 extension on insert. Staying on 18.4
-	// avoids that regression while still receiving CNPG's Debian/PGDG
-	// security rebuilds; revert to the floating "18-minimal-trixie" tag once
-	// a DocumentDB release carrying the PG 18.6 fix ships.
-	// +kubebuilder:default="ghcr.io/cloudnative-pg/postgresql:18.4-minimal-trixie"
+	// The default floats within PostgreSQL major 18 via CNPG's
+	// "18-minimal-trixie" tag, so deployments pick up new 18.x minors and
+	// Debian/PGDG security rebuilds automatically.
+	//
+	// The floating tag currently resolves to PG 18.6+, which is only safe
+	// for DocumentDB extension >= 0.116.0: older extensions segfault on
+	// insert under PG 18.6 (fixed upstream in documentdb/documentdb 3555c7d,
+	// first released in 0.116.0). Keep the default documentDbVersion, and any
+	// version pair exercised against this default, at >= 0.116.0.
+	// +kubebuilder:default="ghcr.io/cloudnative-pg/postgresql:18-minimal-trixie"
 	// +optional
 	Postgres string `json:"postgres,omitempty"`
 }

@@ -72,7 +72,7 @@ The project uses **two independent version tracks** for container images:
 | Track | Images | Version Source | Tag Example |
 |-------|--------|---------------|-------------|
 | **Operator** | operator, sidecar, wal-replica | `Chart.appVersion` | `0.2.0` |
-| **Database** | documentdb (extension), gateway | `values.yaml` → `documentDbVersion` | `0.113.0` |
+| **Database** | documentdb (extension), gateway | `values.yaml` → `documentDbVersion` | `0.117.0` |
 
 - Operator images are built from this repo's Go source
 - Database images are built from the PGDG `postgresql-18-documentdb` package (Debian 13) and the public `documentdb-local` gateway image
