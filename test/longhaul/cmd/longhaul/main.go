@@ -141,22 +141,22 @@ func run(cfg config.Config) int {
 	// below the verifier's confirmed floor, so it never affects the durability
 	// verdict. Disabled when RetainPerWriter == 0.
 	if cfg.RetainPerWriter > 0 {
-		workload.StartPruner(ctx, db.Collection(workload.CollectionName), writers, verifier, cfg.RetainPerWriter, metrics, j)
+		workload.StartPruner(ctx, db.Collection(workload.CollectionName), writers, verifier, cfg.RetainPerWriter, cfg.PruneInterval, metrics, j)
 		j.Info("main", "retention pruner started")
 	} else {
 		j.Info("main", "retention pruning disabled (LONGHAUL_RETAIN_PER_WRITER=0)")
 	}
 
-	// Configure operations.
-	ops := []operations.Operation{
-		operations.NewScaleUp(clusterClient, healthMon, cfg.MaxInstances, cfg.RecoveryTimeout),
-		operations.NewScaleDown(clusterClient, healthMon, cfg.MinInstances, cfg.RecoveryTimeout),
-		operations.NewUpgradeDocumentDB(clusterClient, k8sClientset, healthMon, j, cfg.Namespace, cfg.RecoveryTimeout),
+	// Build the operation registry once, then select the configured runner.
+	registry, err := operations.NewDefaultRegistry(cfg, clusterClient, k8sClientset, healthMon, j)
+	if err != nil {
+		log.Fatalf("failed to build operation registry: %v", err)
 	}
-
-	// Start operation scheduler.
-	scheduler := operations.NewScheduler(ops, healthMon, j, cfg.OpCooldown)
-	go scheduler.Run(ctx)
+	opRunner, err := newOperationRunner(cfg, registry, healthMon, j)
+	if err != nil {
+		log.Fatalf("failed to configure operation runner: %v", err)
+	}
+	go opRunner.Run(ctx)
 
 	// Start data-protection verifier (ScheduledBackup + retention). Runs
 	// concurrently with the scheduler by design — backup is deliberately not
@@ -184,32 +184,54 @@ func run(cfg config.Config) int {
 	go runMetricsSampling(ctx, clusterClient, leakDetector, j)
 
 	// Start periodic checkpoint reporter.
-	summaryFunc := func() report.Summary {
-		return buildSummary(metrics, backupMetrics, leakDetector, scheduler, j)
+	summaryFunc := func(final bool) report.Summary {
+		return buildSummary(metrics, backupMetrics, leakDetector, opRunner, j, final)
 	}
 	reporter := report.NewCheckpointReporter(k8sClientset, cfg.Namespace, cfg.ReportInterval, summaryFunc)
 	go reporter.Run(ctx)
 
 	j.Info("main", "all components started, entering main loop")
 
-	// Main loop: wait for context expiry.
-	<-ctx.Done()
-	j.Info("main", fmt.Sprintf("test ending: %v", ctx.Err()))
+	// Sequence mode is completion-driven: it exits as soon as its operations
+	// have finished (or a failure occurs); MaxDuration is only its watchdog.
+	// Random and disabled modes are duration-driven.
+	completionDriven := cfg.OperationMode == config.OperationModeSequence
+	if completionDriven {
+		select {
+		case <-opRunner.Done():
+			j.Info("main", "operations finished")
+		case <-ctx.Done():
+			j.Info("main", fmt.Sprintf("operations watchdog fired: %v", ctx.Err()))
+			if sr, ok := opRunner.(*operations.SequenceRunner); ok {
+				sr.MarkIncomplete(
+					fmt.Sprintf("operation sequence incomplete: watchdog fired: %v", ctx.Err()),
+				)
+			}
+			<-opRunner.Done()
+		}
+	} else {
+		// Random/disabled modes are duration-driven, but a terminal operation
+		// failure also halts the runner early (Scheduler.Run returns and closes
+		// Done). React to that too so the FAIL verdict is emitted promptly
+		// instead of waiting out MaxDuration, which is unbounded in production.
+		select {
+		case <-ctx.Done():
+			j.Info("main", fmt.Sprintf("test ending: %v", ctx.Err()))
+		case <-opRunner.Done():
+			j.Info("main", "operations halted early (failure)")
+		}
+		cancel()
+		<-opRunner.Done()
+	}
+	cancel()
 
 	// Allow goroutines to flush.
 	time.Sleep(500 * time.Millisecond)
 
-	// Generate final report. Persist to the report ConfigMap synchronously
-	// here (before os.Exit) so the authoritative verdict reaches the source
-	// of truth that operators consult — the Run() goroutine cannot do this
-	// reliably because os.Exit can kill it mid-Update.
-	summary := buildSummary(metrics, backupMetrics, leakDetector, scheduler, j)
-	markdown := report.GenerateMarkdown(summary)
-	fmt.Println("\n" + markdown)
-	reporter.EmitFinal()
-
-	// Emit final GitHub Actions annotation.
-	report.EmitAnnotation(summary)
+	// Emit exactly one terminal report synchronously before os.Exit. EmitFinal
+	// prints the markdown, emits the GitHub Actions annotation, and persists the
+	// authoritative verdict to the report ConfigMap.
+	summary := reporter.EmitFinal()
 
 	if summary.Result == report.ResultFail {
 		log.Printf("TEST FAILED: %s", summary.FailReason)
@@ -220,36 +242,77 @@ func run(cfg config.Config) int {
 	return 0
 }
 
+func newOperationRunner(
+	cfg config.Config,
+	registry *operations.Registry,
+	health *monitor.HealthMonitor,
+	j *journal.Journal,
+) (operations.Runner, error) {
+	switch cfg.OperationMode {
+	case config.OperationModeRandom:
+		return operations.NewScheduler(registry.All(), health, j, cfg.OpCooldown), nil
+	case config.OperationModeSequence:
+		ops, err := registry.Resolve(cfg.OperationSequence)
+		if err != nil {
+			return nil, err
+		}
+		return operations.NewSequenceRunner(ops, health, j, cfg.RecoveryTimeout), nil
+	case config.OperationModeDisabled:
+		return operations.NewDisabledRunner(), nil
+	default:
+		return nil, fmt.Errorf("unsupported operation mode %q", cfg.OperationMode)
+	}
+}
+
 // buildSummary constructs a report.Summary from current state.
-func buildSummary(metrics *workload.Metrics, backupMetrics *backup.Metrics, leakDetector *monitor.LeakDetector, scheduler *operations.Scheduler, j *journal.Journal) report.Summary {
+func buildSummary(
+	metrics *workload.Metrics,
+	backupMetrics *backup.Metrics,
+	leakDetector *monitor.LeakDetector,
+	opRunner operations.Runner,
+	j *journal.Journal,
+	final bool,
+) report.Summary {
 	snap := metrics.Snapshot()
 	backupSnap := backupMetrics.Snapshot()
 	leakAnalysis := leakDetector.Analyze()
+	operationRun := opRunner.Snapshot()
 
 	result := report.ResultPass
 	failReason := ""
 
-	appendReason := func(msg string) {
-		result = report.ResultFail
-		if failReason != "" {
-			failReason += "; "
-		}
-		failReason += msg
-	}
-
 	if snap.HasDataLoss() {
-		appendReason(fmt.Sprintf("data loss: %d gaps, %d checksum errors",
+		result = report.ResultFail
+		failReason = appendFailReason(failReason, fmt.Sprintf("data loss: %d gaps, %d checksum errors",
 			snap.GapsDetected, snap.ChecksumErrors))
 	}
+	if operationRun.HasFailure() {
+		result = report.ResultFail
+		failReason = appendFailReason(failReason, operationRun.FailureReason)
+		if operationRun.FailureReason == "" {
+			failReason = appendFailReason(failReason, "operation execution failed")
+		}
+	}
+	if final &&
+		operationRun.Mode == config.OperationModeSequence &&
+		operationRun.Status != operations.RunStatusComplete &&
+		!operationRun.HasFailure() {
+		result = report.ResultFail
+		failReason = appendFailReason(failReason,
+			fmt.Sprintf("operation sequence incomplete (status %s)", operationRun.Status))
+	}
 	if j.HasPolicyViolation() {
-		appendReason("outage policy violated")
+		result = report.ResultFail
+		failReason = appendFailReason(failReason, "outage policy violated")
 	}
 	if backupSnap.HasRetentionLeak() {
-		appendReason(fmt.Sprintf("backup retention leak: %d expired backups not collected",
+		result = report.ResultFail
+		failReason = appendFailReason(failReason, fmt.Sprintf("backup retention leak: %d expired backups not collected",
 			backupSnap.RetentionLeaks))
 	}
 	if backupSnap.HasCompletionStall() {
-		appendReason(fmt.Sprintf("backup completion stalled: %d backups scheduled with no completion",
+		result = report.ResultFail
+		failReason = appendFailReason(failReason, fmt.Sprintf("backup completion stalled: %d backups scheduled with no completion",
 			backupSnap.MaxScheduledWithoutCompletion))
 	}
 
@@ -259,11 +322,25 @@ func buildSummary(metrics *workload.Metrics, backupMetrics *backup.Metrics, leak
 		Metrics:      snap,
 		Backup:       backupSnap,
 		LeakAnalysis: leakAnalysis,
-		OpsExecuted:  scheduler.OpsExecuted(),
+		OpsExecuted:  operationRun.OpsExecuted(),
+		OperationRun: operationRun,
 		Windows:      j.DisruptionWindows(),
 		Events:       j.Events(),
 		FailReason:   failReason,
 	}
+}
+
+func appendFailReason(existing, reason string) string {
+	if reason == "" {
+		return existing
+	}
+	if existing == "" {
+		return reason
+	}
+	if existing == reason {
+		return existing
+	}
+	return existing + "; " + reason
 }
 
 // runMetricsSampling periodically collects pod resource metrics and feeds the leak detector.

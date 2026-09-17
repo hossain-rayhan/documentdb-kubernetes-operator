@@ -17,9 +17,10 @@ import (
 
 // fakeClusterClient is a minimal ClusterClient stub for tests.
 type fakeClusterClient struct {
-	mu     sync.Mutex
-	health ClusterHealth
-	err    error
+	mu      sync.Mutex
+	health  ClusterHealth
+	err     error
+	onFetch func() // invoked during GetClusterHealth, before it returns
 }
 
 func (f *fakeClusterClient) setHealth(h ClusterHealth) {
@@ -35,15 +36,25 @@ func (f *fakeClusterClient) setErr(err error) {
 }
 func (f *fakeClusterClient) GetClusterHealth(_ context.Context) (ClusterHealth, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.health, f.err
+	hook := f.onFetch
+	health, err := f.health, f.err
+	f.mu.Unlock()
+	// Simulate work happening concurrently with the (unlocked) fetch, e.g. a
+	// disruption opening and invalidating steady state while this reading —
+	// captured above, hence stale — is still in flight.
+	if hook != nil {
+		hook()
+	}
+	return health, err
 }
 func (f *fakeClusterClient) GetCurrentDocumentDBImageTag(_ context.Context) (string, error) {
 	return "", nil
 }
-func (f *fakeClusterClient) GetInstancesPerNode(_ context.Context) (int, error)  { return 1, nil }
-func (f *fakeClusterClient) ScaleCluster(_ context.Context, _ int) error         { return nil }
-func (f *fakeClusterClient) UpgradeDocumentDB(_ context.Context, _ string) error { return nil }
+func (f *fakeClusterClient) GetInstancesPerNode(_ context.Context) (int, error)   { return 1, nil }
+func (f *fakeClusterClient) ScaleCluster(_ context.Context, _ int) error          { return nil }
+func (f *fakeClusterClient) UpgradeDocumentDB(_ context.Context, _ string) error  { return nil }
+func (f *fakeClusterClient) GetPrimaryInstance(_ context.Context) (string, error) { return "", nil }
+func (f *fakeClusterClient) DeletePod(_ context.Context, _ string) error          { return nil }
 
 var _ = Describe("HealthMonitor", func() {
 	Describe("IsSteadyState", func() {
@@ -89,6 +100,36 @@ var _ = Describe("HealthMonitor", func() {
 			c.setErr(errors.New("apiserver unreachable"))
 			h.check(context.Background())
 			Expect(h.IsSteadyState()).To(BeFalse())
+		})
+	})
+
+	Describe("InvalidateSteadyState", func() {
+		It("does not let a health sample fetched before invalidation establish steady state", func() {
+			c := &fakeClusterClient{}
+			c.setHealth(ClusterHealth{AllPodsReady: true, CRReady: true, ReadyPods: 2, TotalPods: 2})
+			h := NewHealthMonitor(c, journal.New(), 1*time.Millisecond)
+
+			// The fetch returns a healthy (pre-disruption) reading, but a
+			// disruption invalidates steady state while that reading is in
+			// flight. The stale sample must be discarded, not published as a
+			// fresh steady-state epoch.
+			c.mu.Lock()
+			c.onFetch = func() { h.InvalidateSteadyState() }
+			c.mu.Unlock()
+
+			h.check(context.Background())
+			time.Sleep(3 * time.Millisecond)
+			Expect(h.IsSteadyState()).To(BeFalse(),
+				"a pre-invalidation healthy sample must not satisfy the steady-state gate")
+
+			// A subsequent fetch that starts after the invalidation legitimately
+			// re-establishes steady state.
+			c.mu.Lock()
+			c.onFetch = nil
+			c.mu.Unlock()
+			h.check(context.Background())
+			time.Sleep(3 * time.Millisecond)
+			Expect(h.IsSteadyState()).To(BeTrue())
 		})
 	})
 

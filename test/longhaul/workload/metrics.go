@@ -26,8 +26,9 @@ type Metrics struct {
 	WriteAcknowledged atomic.Int64
 
 	// WriteFailed counts non-DupKey insert errors. Does not advance seq, so
-	// the next tick retries the same seq; charged against the disruption-window
-	// budget via journal.RecordWriteFailure.
+	// the next tick retries the same seq; reported to the disruption window via
+	// journal.RecordWriteOutcome, which measures the outage duration from
+	// timestamps.
 	WriteFailed atomic.Int64
 
 	// VerifyPasses is the number of completed verifier scan cycles.
@@ -42,6 +43,11 @@ type Metrics struct {
 	// ChecksumErrors counts documents whose stored checksum doesn't match the
 	// recomputed value. Non-zero => FAIL with reason "data loss".
 	ChecksumErrors atomic.Int64
+
+	// DocsPruned is the cumulative number of documents the retention pruner has
+	// deleted. It is a liveness signal for the pruner (a durable counter that
+	// survives the journal's bounded event ring), not a pass/fail oracle.
+	DocsPruned atomic.Int64
 
 	// StartTime is when this Metrics was constructed; resets on pod restart.
 	StartTime time.Time
@@ -63,6 +69,7 @@ type MetricsSnapshot struct {
 	VerifyPasses      int64
 	GapsDetected      int64
 	ChecksumErrors    int64
+	DocsPruned        int64
 	Elapsed           time.Duration
 }
 
@@ -75,6 +82,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		VerifyPasses:      m.VerifyPasses.Load(),
 		GapsDetected:      m.VerifyGapsDetected.Load(),
 		ChecksumErrors:    m.ChecksumErrors.Load(),
+		DocsPruned:        m.DocsPruned.Load(),
 		Elapsed:           time.Since(m.StartTime),
 	}
 }

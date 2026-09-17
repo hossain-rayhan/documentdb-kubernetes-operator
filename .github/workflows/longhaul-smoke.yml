@@ -16,16 +16,19 @@
 #   The operator + sidecar are built from THIS PR's source (via the shared
 #   test-build-and-package.yml reusable workflow) so a code change that breaks
 #   the operator is caught. The documentdb + gateway (database) images are NOT
-#   rebuilt: test-build-and-package.yml probes the public registry for the
-#   pinned documentDbVersion and, when present, runs in "registry mode" and
-#   simply re-tags the public images into the build artifact. The long-haul
-#   driver image is the only extra image this workflow builds.
+#   built at all: the smoke exercises an upgrade between two published database
+#   releases, pulling both the 0.116.0 base and the 0.117.0 target straight
+#   from the public registry. The long-haul driver image is the only extra
+#   image this workflow builds.
 #
 # Environment bring-up is delegated to the shared composite action
 #   .github/actions/setup-test-environment
-# (use-external-images: false — load operator/sidecar/documentdb/gateway from
-# the build artifacts into kind), exactly like test-e2e.yml. No operator-install
-# logic is duplicated here.
+# (use-external-images: false — load the operator/sidecar built from this PR
+# into kind), exactly like test-e2e.yml. No operator-install logic is
+# duplicated here. The action also loads the artifact's documentdb/gateway
+# images, but the smoke does not use them: the database base and target are
+# pulled from the public registry (see the setup-step overrides and the
+# prepare step).
 #
 # Why reuse test/longhaul/deploy/{deployment,rbac}.yaml as-is
 #   The whole point of the gate is to exercise the SAME manifests the long-haul
@@ -42,23 +45,37 @@
 #   longhaul-report ConfigMap's result field.
 #
 # CI budget
-#   Scale/upgrade disruption ops are disabled for the smoke run
-#   (LONGHAUL_MIN_INSTANCES == LONGHAUL_MAX_INSTANCES) so the gate is a fast,
-#   deterministic data-durability check (writers + verifier) that fits a
-#   GitHub-hosted runner and finishes in a few minutes.
+#   Scale ops run for real (MIN=2, MAX=3). The gate exercises every registered
+#   operation once and finishes within a GitHub-hosted runner's budget.
+#
+# Operations exercised (sequence mode)
+#   The smoke runs the operation scheduler in sequence mode
+#   (LONGHAUL_OPERATION_MODE=sequence) with an explicit ordered list
+#   (LONGHAUL_OPERATION_SEQUENCE). Each operation — scale-up, scale-down,
+#   upgrade-documentdb, kill-operator-pod, kill-primary-pod — runs exactly once,
+#   in order, gated by the same steady-state / precondition / recovery logic the
+#   long-haul run uses. This is the deterministic path that builds confidence the
+#   operations execute end-to-end; the gate asserts every sequenced operation
+#   reached PASSED and the run reached COMPLETE. The upgrade is a real
+#   cross-version rolling upgrade between two published releases: the cluster
+#   starts on DB_BASE_VERSION (0.116.0) and the upgrade-documentdb operation
+#   moves documentDBVersion forward to DB_TARGET_VERSION (0.117.0), exercising
+#   the operator's rolling-update path with clean semver versions the
+#   image-rollback webhook accepts. Both endpoints are hardcoded in the job env.
+#   MAX_DURATION is only the completion watchdog.
 #
 # Data-protection gate
 #   The backup verifier is exercised for real, not just compiled in. The kind
 #   cluster already has CSI VolumeSnapshot support (setup-test-environment runs
 #   deploy-csi-driver.sh: external-snapshotter + a default csi-hostpath
-#   VolumeSnapshotClass), so a single-instance cluster can complete snapshot
-#   backups — exactly as the e2e scheduled-backup test proves. The smoke run
-#   sets a per-minute backup schedule and a 30s verify interval (vs the 5m
-#   default, via LONGHAUL_BACKUP_VERIFY_INTERVAL) so the verifier's periodic
-#   loop fires many times within the window and reliably observes a
-#   scheduled+completed backup. It then asserts scheduled AND completed >= 1
-#   (with no retention leak or completion stall), so a broken backup path fails
-#   the PR rather than passing silently as a no-op.
+#   VolumeSnapshotClass), so the cluster can complete snapshot backups —
+#   exactly as the e2e scheduled-backup test proves. The smoke run sets a
+#   per-minute backup schedule and a 30s verify interval (vs the 5m default,
+#   via LONGHAUL_BACKUP_VERIFY_INTERVAL) so the verifier's periodic loop fires
+#   many times within the window and reliably observes a scheduled+completed
+#   backup. It then asserts scheduled AND completed >= 1 (with no retention leak
+#   or completion stall), so a broken backup path fails the PR rather than
+#   passing silently as a no-op.
 
 name: Long-Haul Smoke Gate
 
@@ -74,9 +91,9 @@ on:
   workflow_dispatch:
     inputs:
       max_duration:
-        description: "Bounded driver run length (Go duration). Keep >= 6m so at least one per-minute backup is scheduled and completed within the window."
+        description: "Completion watchdog duration (Go duration, e.g. 20m). Keep >= 6m so at least one per-minute backup is scheduled and completed within the window."
         required: false
-        default: "6m"
+        default: "20m"
 
 permissions:
   contents: read
@@ -102,8 +119,9 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Build operator + sidecar from this PR's source; reuse public documentdb /
-  # gateway images (registry mode) so the database images are NOT rebuilt.
+  # Build operator + sidecar from this PR's source; the database (documentdb /
+  # gateway) images are NOT built or used from the artifact — the smoke pulls
+  # the released base and upgrade-target database images directly.
   # Produces the platform-images tar + helm chart artifacts the setup action
   # loads into kind.
   # ---------------------------------------------------------------------------
@@ -119,7 +137,7 @@ jobs:
     needs: build
     if: always() && needs.build.result == 'success'
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     env:
       IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
       EXT_IMAGE_TAG: ${{ needs.build.outputs.ext_image_tag }}
@@ -128,11 +146,21 @@ jobs:
       # Must match the cluster name the composite action derives:
       #   documentdb-<test-type>-<architecture>-<test-scenario-name>
       KIND_CLUSTER: documentdb-longhaul-amd64-smoke
-      # The pruner's first tick is at 5m; the default must run beyond it.
-      MAX_DURATION: ${{ github.event.inputs.max_duration || '6m' }}
+      # Completion watchdog; also kept beyond the 5m pruner tick and long enough
+      # for at least one per-minute backup to schedule and complete.
+      MAX_DURATION: ${{ github.event.inputs.max_duration || '20m' }}
+      # Two published database releases the smoke upgrades between. The cluster
+      # STARTS at DB_BASE_VERSION and the upgrade operation moves it forward to
+      # DB_TARGET_VERSION. Both are hardcoded here and pulled from the public
+      # registry — the smoke builds no database image. 0.116.0 is the published
+      # release immediately preceding 0.117.0.
+      DB_BASE_VERSION: "0.116.0"
+      DB_TARGET_VERSION: "0.117.0"
+      DOCUMENTDB_REPO: ghcr.io/documentdb/documentdb-kubernetes-operator/documentdb
+      GATEWAY_REPO: ghcr.io/documentdb/documentdb-kubernetes-operator/gateway
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build long-haul driver image
         run: |
@@ -148,13 +176,13 @@ jobs:
       # platform-specific image tarball (operator/sidecar/documentdb/gateway,
       # loaded into kind) and the amd64 helm chart.
       - name: Download platform images artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: build-platform-images
           path: ./artifacts/build-platform-images
 
       - name: Download helm chart artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: build-helm-chart-amd64
           path: ./artifacts/build-helm-chart-amd64
@@ -167,7 +195,7 @@ jobs:
           runner: "ubuntu-22.04"
           test-scenario-name: "smoke"
           node-count: "1"
-          instances-per-node: "1"
+          instances-per-node: "2"
           cert-manager-namespace: ${{ env.CERT_MANAGER_NS }}
           operator-namespace: ${{ env.OPERATOR_NS }}
           db-namespace: ${{ env.DB_NS }}
@@ -176,7 +204,18 @@ jobs:
           db-password: ${{ env.DB_PASSWORD }}
           db-port: ${{ env.GATEWAY_PORT }}
           image-tag: ${{ env.IMAGE_TAG }}
+          # Required only to satisfy the shared action's mandatory local-build
+          # DB-image load (it kind-loads the artifact's documentdb/gateway images
+          # tagged with this value). The smoke does not otherwise use those
+          # images — the upgrade's base and target are pulled from the public
+          # registry (see the overrides below and the prepare step).
           documentdb-image-tag: ${{ env.EXT_IMAGE_TAG }}
+          # Start the cluster at the released base version so the upgrade
+          # operation performs a real cross-version rolling upgrade. These
+          # overrides make the composite action pull the released images and
+          # deploy the CR with explicit spec.image fields pinned to the base.
+          documentdb-image: ${{ env.DOCUMENTDB_REPO }}:${{ env.DB_BASE_VERSION }}
+          gateway-image: ${{ env.GATEWAY_REPO }}:${{ env.DB_BASE_VERSION }}
           chart-version: ${{ env.CHART_VERSION }}
           use-external-images: "false"
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -198,6 +237,50 @@ jobs:
             --from-literal=uri="${URI}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Prepare cross-version upgrade target (0.116.0 -> 0.117.0)
+        run: |
+          set -euo pipefail
+          target_version="${DB_TARGET_VERSION}"
+          echo "Upgrade: ${DB_BASE_VERSION} -> ${target_version}"
+
+          # Pull the RELEASED target database images straight from the public
+          # registry and load them into kind under their canonical repo + semver
+          # tag, so documentDBVersion=<target> resolves to the real release. The
+          # base (0.116.0) was already pulled and deployed by the setup step via
+          # the spec.image overrides; the smoke builds no database image.
+          for component in documentdb gateway; do
+            img="ghcr.io/documentdb/documentdb-kubernetes-operator/${component}:${target_version}"
+            docker pull "${img}"
+            kind load docker-image "${img}" --name "${KIND_CLUSTER}"
+          done
+
+          # setup-test-environment deployed the CR with explicit spec.image
+          # fields pinned to the base version, which take precedence over
+          # documentDBVersion. Convert to the equivalent version-based reference
+          # (same base payload, image cleared) so the driver's upgrade operation
+          # can move documentDBVersion from the base to the target. Because the
+          # resolved version is unchanged (base == running) the image-rollback
+          # admission webhook accepts this patch.
+          version_patch=$(BASE_VERSION="${DB_BASE_VERSION}" jq -nc '{
+              spec: {
+                documentDBVersion: env.BASE_VERSION,
+                image: {
+                  documentDB: null,
+                  gateway: null
+                }
+              }
+            }')
+          kubectl patch documentdb "${DB_NAME}" -n "${DB_NS}" \
+            --type merge -p "${version_patch}"
+
+          # The upgrade operation reads this desired version from the ConfigMap
+          # and patches documentDBVersion to it; both base and target are clean
+          # semvers so the forward move (0.116.0 -> target) is permitted.
+          kubectl create configmap longhaul-versions \
+            -n "${DB_NS}" \
+            --from-literal="desired-documentdb-version=${target_version}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Deploy long-haul driver (real manifests, bounded override)
         run: |
           # RBAC applies unmodified (namespace matches DB_NS).
@@ -215,11 +298,21 @@ jobs:
 
           # Bounded, deterministic smoke override — patch ONLY runtime knobs on
           # the shipped ConfigMap; the manifest structure is unchanged.
-          #  - MAX_DURATION: finite run
+          #  - MAX_DURATION: finite run (completion watchdog)
           #  - RESET_DATA: fresh collection each CI run
-          #  - RETAIN_PER_WRITER: low enough to force a real prune at 5m
-          #  - MIN==MAX instances: disable disruptive scale ops (fast + stable)
+          #  - RETAIN_PER_WRITER + PRUNE_INTERVAL: retain few docs and prune
+          #    every 30s (vs the 5m default) so a real prune fires within the
+          #    bounded window instead of relying on the run happening to outlast
+          #    the default first tick.
+          #  - OPERATION_MODE=sequence + OPERATION_SEQUENCE: run every operation
+          #    (scale-up, scale-down, upgrade-documentdb, kill-operator-pod,
+          #    kill-primary-pod) exactly once, in a fixed order. This is the
+          #    deterministic path that builds confidence the operations execute
+          #    end-to-end; MAX_DURATION becomes the completion watchdog.
           #  - short cadences so the verifier gets several cycles in the window
+          #  - short steady-state gate with a bounded recovery budget. Sequence
+          #    mode paces ops purely by the steady-state/recovery gates, so
+          #    LONGHAUL_OP_COOLDOWN (a random-mode-only rate limiter) is omitted.
           #  - BACKUP_*: exercise the data-protection verifier for real — a
           #    per-minute schedule so at least one backup is scheduled and
           #    completed within the bounded window, plus a 30s verify interval
@@ -233,12 +326,14 @@ jobs:
               LONGHAUL_RESET_DATA: "true",
               LONGHAUL_NUM_WRITERS: "2",
               LONGHAUL_RETAIN_PER_WRITER: "100",
-              LONGHAUL_OP_COOLDOWN: "30s",
-              LONGHAUL_STEADY_STATE_WAIT: "10s",
-              LONGHAUL_RECOVERY_TIMEOUT: "2m",
+              LONGHAUL_PRUNE_INTERVAL: "30s",
+              LONGHAUL_OPERATION_MODE: "sequence",
+              LONGHAUL_OPERATION_SEQUENCE: "scale-up,scale-down,upgrade-documentdb,kill-operator-pod,kill-primary-pod",
+              LONGHAUL_STEADY_STATE_WAIT: "5s",
+              LONGHAUL_RECOVERY_TIMEOUT: "10m",
               LONGHAUL_REPORT_INTERVAL: "30s",
-              LONGHAUL_MIN_INSTANCES: "1",
-              LONGHAUL_MAX_INSTANCES: "1",
+              LONGHAUL_MIN_INSTANCES: "2",
+              LONGHAUL_MAX_INSTANCES: "3",
               LONGHAUL_BACKUP_ENABLED: "true",
               LONGHAUL_BACKUP_SCHEDULE: "*/1 * * * *",
               LONGHAUL_BACKUP_RETENTION_DAYS: "1",
@@ -255,7 +350,7 @@ jobs:
         id: wait
         run: |
           set -euo pipefail
-          deadline=$(( $(date +%s) + 900 ))  # 15 min hard cap
+          deadline=$(( $(date +%s) + 1800 ))  # 30 min hard cap
           exit_code=""
           while [[ $(date +%s) -lt ${deadline} ]]; do
             pod=$(kubectl get pods -n "${DB_NS}" \
@@ -299,10 +394,17 @@ jobs:
           exit_code="${{ steps.wait.outputs.exit_code }}"
           result=$(kubectl get configmap longhaul-report -n "${DB_NS}" \
             -o jsonpath='{.data.result}' 2>/dev/null || echo "MISSING")
-          report=$(kubectl get configmap longhaul-report -n "${DB_NS}" \
-            -o jsonpath='{.data.latest-report}' 2>/dev/null || echo "MISSING")
+          operation_status=$(kubectl get configmap longhaul-report -n "${DB_NS}" \
+            -o json | jq -r '.data["operation-status"] // "MISSING"')
+          operation_results=$(kubectl get configmap longhaul-report -n "${DB_NS}" \
+            -o json | jq -r '.data["operation-results"] // "MISSING"')
+          docs_pruned=$(kubectl get configmap longhaul-report -n "${DB_NS}" \
+            -o json | jq -r '.data["docs-pruned"] // "MISSING"')
           echo "Driver exit code : ${exit_code}"
           echo "Report result    : ${result}"
+          echo "Operation status : ${operation_status}"
+          echo "Operation results: ${operation_results}"
+          echo "Docs pruned      : ${docs_pruned}"
 
           if [[ "${exit_code}" != "0" ]]; then
             echo "::error::Driver exited non-zero (${exit_code})."
@@ -312,11 +414,34 @@ jobs:
             echo "::error::longhaul-report result is '${result}', expected PASS."
             exit 1
           fi
-          if ! grep -Eq 'pruner: pruned [1-9][0-9]* docs' <<<"${report}"; then
-            echo "::error::Retention pruner did not report deleting any documents."
+          if [[ "${operation_status}" != "COMPLETE" ]]; then
+            echo "::error::operation-status is '${operation_status}', expected COMPLETE."
             exit 1
           fi
-          echo "✅ Long-haul smoke gate passed (exit 0, report PASS, retention pruned documents)."
+          # Sequence mode: assert every operation in the configured sequence ran
+          # and passed. Order is fixed by LONGHAUL_OPERATION_SEQUENCE above.
+          if ! jq -e '
+            (map(.name)) == ["scale-up","scale-down","upgrade-documentdb","kill-operator-pod","kill-primary-pod"] and
+            all(.[]; .status == "PASSED")
+          ' <<<"${operation_results}" >/dev/null; then
+            echo "::error::operation-results did not show every sequenced operation PASSED in order."
+            exit 1
+          fi
+          # Assert the retention pruner actually deleted documents. Uses the
+          # durable docs-pruned counter rather than grepping the rendered
+          # report, whose event log is capped at the last ~20 entries and can
+          # be dominated by transient disruption-time warnings (e.g. an
+          # InternalError while the primary is failing over) that crowd out the
+          # earlier "pruned N docs" success lines.
+          if ! [[ "${docs_pruned}" =~ ^[0-9]+$ ]]; then
+            echo "::error::docs-pruned is '${docs_pruned}', expected a number."
+            exit 1
+          fi
+          if [[ "${docs_pruned}" -le 0 ]]; then
+            echo "::error::Retention pruner deleted no documents (docs-pruned=${docs_pruned})."
+            exit 1
+          fi
+          echo "✅ Long-haul smoke gate passed (sequence COMPLETE, all operations PASSED, report PASS, retention pruned ${docs_pruned} documents)."
 
       - name: Assert data-protection verifier ran
         run: |

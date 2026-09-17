@@ -44,7 +44,7 @@ flowchart LR
 | Component | Role | Output |
 |---|---|---|
 | **Writer/Verifier** | Data-plane workload. Connects via `mongodb://` only — no k8s imports. Writers insert monotonic sequences with checksums under majority write concern; verifiers scan for gaps and bad checksums. | Counters (acked, failed, verify passes, gaps, checksum errors); errors to journal. |
-| **Operation Scheduler** | Control plane. Applies weighted-random ops (scale, kill, failover, backup, upgrade) with preconditions and cooldowns. | Operation start/end events to journal. |
+| **Operation Runner** | Control plane. Applies weighted-random ops for production long-haul runs, a deterministic named sequence for smoke/reproduction, or no ops when disabled. | Bounded per-operation results/aggregates plus operation events to journal. |
 | **Monitor** | Polls pod RSS/CPU and checks readiness of operator + DB pods. | Periodic samples + readiness events to journal. |
 | **Journal** | In-process append-only event log shared by all components. | Reproducible event stream for the report. |
 | **Report** | Aggregates the journal into a markdown summary at a configurable interval; raises alerts on threshold breaches. | Markdown report; alert lines. |
@@ -77,7 +77,11 @@ The test runs **continuously** — no cycles, no scheduled resets. Workload, met
 
 ## Operations
 
-The scheduler picks operations from these categories with weighted randomization:
+Production runs use weighted randomization. Deterministic smoke and reproduction
+runs can instead request a comma-separated sequence of stable operation names;
+each operation runs exactly once in order and the driver exits as soon as the
+sequence completes or fails. A disabled mode leaves the workload running without
+management operations.
 
 | Category | Examples |
 |---|---|
@@ -87,15 +91,46 @@ The scheduler picks operations from these categories with weighted randomization
 | **Chaos** | kill primary pod, drain node, kill operator pod |
 | **Data protection** | trigger backup, verify backup |
 
-**Sequencing invariants** (enforced by the scheduler — exact values live in code):
+**Operation invariants** (exact values live in code):
 
-- One disruptive op at a time. Overlapping disruptions are non-diagnosable.
-- Per-category cooldown between ops. Lets the cluster stabilize.
-- Steady-state gate — health check must pass before the next op fires.
+- One disruptive op at a time in every mode. Overlapping disruptions are
+  non-diagnosable.
+- Random mode applies the global cooldown between attempts.
+- The steady-state gate must pass before each operation. Sequence mode also
+  requires each named precondition to become true within the recovery timeout.
 
 **Backup is not isolated.** It runs concurrently with topology changes and chaos so that backup-vs-topology serialization bugs surface here rather than in production — that serialization is the backup feature's job, not the harness's.
 
 Each operation declares an **outage policy**: tolerated write failures during its disruption window and a max recovery time. Breaching the policy is recorded as a Tier-1 failure (see Failure Tiers).
+
+### Outage budgets
+
+Budgets are wall-clock write-outage durations, independent of the writer count; the longer whole-topology restart is bounded separately by the recovery timeout.
+
+- **Scale up / down and `kill-operator-pod`** keep the primary write path up throughout, so they are held to a **near-zero** write-outage budget — a regression that unexpectedly disrupts writes during a "safe" operation is caught.
+- **`kill-primary-pod`** tolerates a short outage for a single automatic failover (~30s).
+- **`upgrade-documentdb`** tolerates a larger one (~90s): a cross-version rolling upgrade's primary switchover coincides with the extension migration under live write load.
+
+Exact values live in code (`test/longhaul/journal/policy.go`).
+
+### HA preconditions
+
+`upgrade-documentdb` and `kill-primary-pod` require an HA topology (`spec.instancesPerNode >= 2`): with no standby to absorb writes, the disruption would produce real (true-positive) downtime that no operator change can prevent. The two runners handle an unmet precondition differently: **random** mode **auto-skips** (the skip consumes no cooldown and is re-evaluated on the next scheduler tick, so scaling up makes the operation eligible again), whereas **sequence** mode does not skip — it waits for the precondition up to the recovery timeout and then fails the sequence, so an HA-dependent op must be preceded by a `scale-up` (or start at `instancesPerNode >= 2`).
+
+Operation state is intentionally bounded for multi-day runs. Random mode keeps
+only passed/failed counters per registered operation type; sequence mode keeps
+one mutable `PENDING`/`RUNNING`/`PASSED`/`FAILED` result per requested item.
+Execution errors, precondition timeouts, outage-policy violations, and an
+incomplete sequence at shutdown all produce a failing final verdict.
+
+**Sequence mode** (used by the PR smoke gate) runs the registered operations in
+an explicit, fixed order (`LONGHAUL_OPERATION_SEQUENCE`), executing each exactly
+once behind the same steady-state / precondition / recovery gates as random
+mode, rather than selecting operations by weight for the full duration. This
+gives the smoke gate a deterministic PASS/FAIL verdict — every sequenced
+operation must reach `PASSED` and the run must reach `COMPLETE`; `MAX_DURATION`
+becomes the completion watchdog, and a sequence that has not finished at shutdown
+is a failing `INCOMPLETE` verdict.
 
 ---
 
@@ -112,6 +147,20 @@ Key invariants:
 - **Deployment-blind.** The workload imports no Kubernetes libraries, so the same binary runs against any cluster (AKS, EKS, GKE, kind).
 
 Losing an acknowledged write or observing a checksum mismatch is a Tier-1 failure regardless of what else is happening.
+
+---
+
+## Backup Verification
+
+When enabled, the driver maintains a canary `ScheduledBackup` named `<cluster>-longhaul` (reconciled in place, never recreated, so history survives restarts and parameter changes) and runs a verifier concurrently with the operation scheduler — backup is deliberately not isolated from topology/chaos.
+
+The verifier only checks properties a **multi-day** run can establish, which unit and e2e tests cannot:
+
+- **Scheduling liveness** — `status.lastScheduledTime` keeps advancing; a stalled scheduler (past `nextScheduledTime` + grace) raises a warning.
+- **Completion** — child `Backup` CRs keep reaching `completed`. Only terminal `failed` backups count as failures; a `skipped` backup (e.g. the operator declines to back up a standby) is an intentional no-op. If backups are scheduled but stop completing for **3 consecutive schedules**, the run FAILs; a completed or skipped backup resets the gap, so transient chaos-induced failures and normal standby/failover intervals are tolerated.
+- **Retention leak** — no completed backup outlives its retention window (`stoppedAt + spec.retentionDays*24h` + grace), taken from each backup's own stamped `retentionDays` (so the check stays correct even if a later run uses a different retention). A lingering backup is a FAIL: expired backups (and their PVCs / VolumeSnapshots) would otherwise grow unbounded.
+
+The oracle is black-box: expired backups disappear. It deliberately does **not** re-verify the operator's retention *arithmetic* (`expiredAt == stoppedAt + retentionDays*24h`) — that is a pure function already covered by operator unit tests and needs no accumulation. Because the minimum meaningful retention is 1 day, the leak check only fires on multi-day runs — exactly the accumulation window long-haul exists to cover.
 
 ---
 
@@ -149,6 +198,32 @@ A Fatal failure does **not** auto-recreate the cluster — the preserved state i
 | **Antithesis** | Same property-based oracle philosophy applied to unmodified binaries | Deterministic hypervisor — runs in simulated time on a fake network/disk, so it targets rare-interleaving logic bugs rather than the wall-clock accumulation bugs long-haul exists to catch |
 
 **Universal pattern:** Separate workload from disruptions, run concurrently, verify against an acknowledged-write oracle, use per-operation disruption budgets.
+
+---
+
+## Relationship to `test/e2e/`
+
+The `test/e2e/` Ginkgo suite (added in PR #346) and this long-haul harness are **separate modules with intentionally different shapes**. They share a problem domain (exercising a DocumentDB cluster) but answer different questions:
+
+| | `test/e2e/` | `test/longhaul/` |
+|---|---|---|
+| Shape | Go test binary (Ginkgo specs) | Standalone long-running daemon |
+| Lifetime | Minutes per spec | Days–weeks per run |
+| Asserts | One behavior per spec, then exits | Continuous invariants over time |
+| Failure mode | `t.Fail` per spec | Journal entry + alert + auto-restart |
+| Cluster | Created + torn down per run | Long-lived dedicated AKS cluster |
+| Operator API | Typed (`previewv1.DocumentDB` via controller-runtime) | Typed (`previewv1.DocumentDB` via controller-runtime + `test/shared/documentdb` helpers) |
+
+**Shared code today.** The harness consumes the `test/shared/` module (extracted in PR #401):
+
+- `test/shared/documentdb` — typed `DocumentDB` CR helpers (`Get`, `IsHealthy`, `PatchInstances`, `PatchSpec`). The monitor's `K8sClusterClient` uses these as the single source of truth for the readiness predicate so longhaul and e2e can't drift on what "healthy" means.
+- `test/shared/mongo` — `NewFromURI` for the data-plane connection.
+
+**Future opportunities.** The e2e suite has additional helpers in `test/e2e/pkg/e2eutils/` that this harness will likely consume as it grows:
+
+- `e2eutils/mongo` — `BuildURI` (URL-escapes username/password), TLS-from-CA-bundle, `Handle` with port-forward + secret-backed credentials.
+- `e2eutils/operatorhealth` — pod-ready / CRD-ready gating used during e2e setup.
+- `e2eutils/clusterprobe` — CRD presence checks.
 
 ---
 

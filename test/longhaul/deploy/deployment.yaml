@@ -15,10 +15,10 @@
 # driver pods concurrently against the same DocumentDB cluster /
 # workload collection).
 #
-# Failure semantics: on critical failure (data loss, policy violation)
-# the driver exits non-zero. The Deployment auto-restarts the pod, which
-# gives MTBF data; the alert workflow polls the report ConfigMap and
-# pages on incident-count thresholds.
+# Failure semantics: on critical failure (data loss, operation failure, or
+# policy violation) the driver exits non-zero. The Deployment auto-restarts
+# the pod, which gives MTBF data; the alert workflow polls the report ConfigMap
+# and pages on incident-count thresholds.
 #
 # Image refs are templated; the longhaul-deploy workflow substitutes:
 #   __OWNER__      -> lowercased ${{ github.repository_owner }}
@@ -42,8 +42,12 @@ data:
   # Writer/verifier counts.
   LONGHAUL_NUM_WRITERS: "5"
   # Operation scheduling.
+  # random preserves the production long-haul behavior. sequence executes
+  # LONGHAUL_OPERATION_SEQUENCE exactly once in order; disabled runs no ops.
+  LONGHAUL_OPERATION_MODE: "random"
+  LONGHAUL_OPERATION_SEQUENCE: ""
   LONGHAUL_OP_COOLDOWN: "10m"
-  LONGHAUL_RECOVERY_TIMEOUT: "5m"
+  LONGHAUL_RECOVERY_TIMEOUT: "10m"
   # How long the cluster must be observed healthy before the next
   # operation fires. Matches the in-code default (60s) and the design doc
   # (Section "Steady-state gate"). Keep explicit so operators can lower

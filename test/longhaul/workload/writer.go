@@ -139,7 +139,9 @@ func (w *Writer) writeOne(ctx context.Context) {
 
 	w.metrics.WriteAttempted.Add(1)
 
+	attemptStart := time.Now()
 	err := w.backend.insert(ctx, doc)
+	attemptEnd := time.Now()
 	if err != nil {
 		// Retryable writes are on by default in the v2 driver, so a network
 		// blip during a disruption window can produce this sequence:
@@ -151,17 +153,19 @@ func (w *Writer) writeOne(ctx context.Context) {
 		if w.backend.isDuplicate(err) {
 			w.seq.Store(seq)
 			w.metrics.WriteAcknowledged.Add(1)
+			w.journal.RecordWriteOutcome(attemptStart, attemptEnd, false)
 			return
 		}
 		// For any other error the document was NOT committed. Do NOT advance
 		// seq, otherwise the verifier will see a permanent gap and report
 		// false-positive data loss. The next tick will retry the same seq.
 		w.metrics.WriteFailed.Add(1)
-		w.journal.RecordWriteFailure()
+		w.journal.RecordWriteOutcome(attemptStart, attemptEnd, true)
 		return
 	}
 	w.seq.Store(seq)
 	w.metrics.WriteAcknowledged.Add(1)
+	w.journal.RecordWriteOutcome(attemptStart, attemptEnd, false)
 }
 
 // Resume seeds the writer's seq counter from the highest seq already persisted

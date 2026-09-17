@@ -57,6 +57,13 @@ jobs:
         with:
           reporter: github-pr-check
           fail_level: error
+          # Suppress only the node20-runtime deprecation. actions/download-artifact
+          # has no node24 release yet (v4, v5 and v6 all still declare
+          # `using: node20`), so there is no version bump that satisfies this
+          # check — ignore the message until upstream ships a node24 major.
+          # Every other actionlint diagnostic still fails the gate. The regex
+          # is kept space-free so it survives the action's shell word-splitting.
+          actionlint_flags: -ignore node20
 
       - name: yamllint
         run: |

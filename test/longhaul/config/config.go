@@ -18,12 +18,18 @@ const (
 	EnvNamespace   = "LONGHAUL_NAMESPACE"
 	EnvClusterName = "LONGHAUL_CLUSTER_NAME"
 
+	// EnvOperatorNamespace is the namespace where the DocumentDB operator
+	// Deployment runs (target of the kill-operator-pod chaos op).
+	EnvOperatorNamespace = "LONGHAUL_OPERATOR_NAMESPACE"
+
 	// Workload and operation tuning.
 	EnvDocumentDBURI   = "LONGHAUL_DOCUMENTDB_URI"
 	EnvNumWriters      = "LONGHAUL_NUM_WRITERS"
 	EnvOpCooldown      = "LONGHAUL_OP_COOLDOWN"
 	EnvRecoveryTimeout = "LONGHAUL_RECOVERY_TIMEOUT"
 	EnvSteadyStateWait = "LONGHAUL_STEADY_STATE_WAIT"
+	EnvOperationMode   = "LONGHAUL_OPERATION_MODE"
+	EnvOperationSeq    = "LONGHAUL_OPERATION_SEQUENCE"
 	// Scale operation bounds. The DocumentDB CRD hard-caps spec.nodeCount=1,
 	// so the scale dimension actually exercised is spec.instancesPerNode (1-3).
 	EnvMinInstances = "LONGHAUL_MIN_INSTANCES"
@@ -44,12 +50,24 @@ const (
 	// Data retention. Bounds the workload collection so an unbounded write
 	// test does not eventually exhaust the PVC.
 	EnvRetainPerWriter = "LONGHAUL_RETAIN_PER_WRITER"
+
+	// EnvPruneInterval overrides how often the pruner trims old documents.
+	EnvPruneInterval = "LONGHAUL_PRUNE_INTERVAL"
 )
 
 // DefaultRetainPerWriter is the default number of most-recent documents kept
 // per writer when pruning is enabled. At ~10 writes/sec/writer this retains
 // roughly 55 hours of history per writer while bounding steady-state disk use.
 const DefaultRetainPerWriter = 2_000_000
+
+// OperationMode controls how disruptive operations are run.
+type OperationMode string
+
+const (
+	OperationModeRandom   OperationMode = "random"
+	OperationModeSequence OperationMode = "sequence"
+	OperationModeDisabled OperationMode = "disabled"
+)
 
 // Config holds all configuration for a long haul test run.
 type Config struct {
@@ -61,6 +79,10 @@ type Config struct {
 
 	// ClusterName is the name of the target DocumentDB cluster CR.
 	ClusterName string
+
+	// OperatorNamespace is the namespace of the DocumentDB operator Deployment,
+	// targeted by the kill-operator-pod chaos operation.
+	OperatorNamespace string
 
 	// DocumentDBURI is the DocumentDB connection string for data-plane workload.
 	DocumentDBURI string
@@ -76,6 +98,12 @@ type Config struct {
 
 	// SteadyStateWait is how long the cluster must be healthy before an operation fires.
 	SteadyStateWait time.Duration
+
+	// OperationMode selects weighted-random, deterministic sequence, or no operations.
+	OperationMode OperationMode
+
+	// OperationSequence is the ordered list used only in sequence mode.
+	OperationSequence []string
 
 	// MinInstances is the minimum spec.instancesPerNode for scale-down.
 	// CRD lower bound is 1.
@@ -113,22 +141,29 @@ type Config struct {
 	// Older, already-verified documents are pruned to bound disk usage. Zero
 	// disables pruning (unbounded growth — the pre-retention behavior).
 	RetainPerWriter int64
+
+	// PruneInterval is how often the pruner trims old documents. The 5m default
+	// suits a multi-day run; short bounded runs (e.g. the smoke gate) lower it
+	// so the pruner fires within the window.
+	PruneInterval time.Duration
 }
 
 // DefaultConfig returns a Config with safe defaults for local development.
 func DefaultConfig() Config {
 	return Config{
-		MaxDuration:     30 * time.Minute,
-		Namespace:       "default",
-		ClusterName:     "",
-		DocumentDBURI:   "",
-		NumWriters:      5,
-		OpCooldown:      5 * time.Minute,
-		RecoveryTimeout: 5 * time.Minute,
-		SteadyStateWait: 60 * time.Second,
-		MinInstances:    1,
-		MaxInstances:    3,
-		ReportInterval:  1 * time.Hour,
+		MaxDuration:       30 * time.Minute,
+		Namespace:         "default",
+		ClusterName:       "",
+		OperatorNamespace: "documentdb-operator",
+		DocumentDBURI:     "",
+		NumWriters:        5,
+		OpCooldown:        5 * time.Minute,
+		RecoveryTimeout:   10 * time.Minute,
+		SteadyStateWait:   60 * time.Second,
+		OperationMode:     OperationModeRandom,
+		MinInstances:      1,
+		MaxInstances:      3,
+		ReportInterval:    1 * time.Hour,
 
 		BackupEnabled:        true,
 		BackupSchedule:       "0 */6 * * *",
@@ -136,6 +171,7 @@ func DefaultConfig() Config {
 		BackupVerifyInterval: 5 * time.Minute,
 
 		RetainPerWriter: DefaultRetainPerWriter,
+		PruneInterval:   5 * time.Minute,
 	}
 }
 
@@ -158,6 +194,10 @@ func LoadFromEnv() (Config, error) {
 
 	if v := os.Getenv(EnvClusterName); v != "" {
 		cfg.ClusterName = v
+	}
+
+	if v := os.Getenv(EnvOperatorNamespace); v != "" {
+		cfg.OperatorNamespace = v
 	}
 
 	if v := os.Getenv(EnvDocumentDBURI); v != "" {
@@ -194,6 +234,18 @@ func LoadFromEnv() (Config, error) {
 			return cfg, fmt.Errorf("invalid %s=%q: %w", EnvSteadyStateWait, v, err)
 		}
 		cfg.SteadyStateWait = d
+	}
+
+	if v := strings.TrimSpace(os.Getenv(EnvOperationMode)); v != "" {
+		cfg.OperationMode = OperationMode(strings.ToLower(v))
+	}
+
+	if v := strings.TrimSpace(os.Getenv(EnvOperationSeq)); v != "" {
+		sequence, err := parseOperationSequence(v)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid %s=%q: %w", EnvOperationSeq, v, err)
+		}
+		cfg.OperationSequence = sequence
 	}
 
 	if v := os.Getenv(EnvMinInstances); v != "" {
@@ -256,6 +308,14 @@ func LoadFromEnv() (Config, error) {
 		cfg.RetainPerWriter = n
 	}
 
+	if v := os.Getenv(EnvPruneInterval); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid %s=%q: %w", EnvPruneInterval, v, err)
+		}
+		cfg.PruneInterval = d
+	}
+
 	return cfg, nil
 }
 
@@ -270,6 +330,9 @@ func (c *Config) Validate() error {
 	if c.ClusterName == "" {
 		return fmt.Errorf("cluster name must not be empty")
 	}
+	if c.OperatorNamespace == "" {
+		return fmt.Errorf("operator namespace must not be empty")
+	}
 	if c.NumWriters < 1 {
 		return fmt.Errorf("num writers must be at least 1, got %d", c.NumWriters)
 	}
@@ -278,6 +341,26 @@ func (c *Config) Validate() error {
 	}
 	if c.RecoveryTimeout <= 0 {
 		return fmt.Errorf("recovery timeout must be positive, got %s", c.RecoveryTimeout)
+	}
+	switch c.OperationMode {
+	case OperationModeRandom, OperationModeDisabled:
+		if len(c.OperationSequence) > 0 {
+			return fmt.Errorf("operation sequence must be empty when operation mode is %q", c.OperationMode)
+		}
+	case OperationModeSequence:
+		if len(c.OperationSequence) == 0 {
+			return fmt.Errorf("operation sequence must not be empty when operation mode is %q", c.OperationMode)
+		}
+		seen := make(map[string]struct{}, len(c.OperationSequence))
+		for _, name := range c.OperationSequence {
+			if _, ok := seen[name]; ok {
+				return fmt.Errorf("operation sequence contains duplicate name %q", name)
+			}
+			seen[name] = struct{}{}
+		}
+	default:
+		return fmt.Errorf("operation mode must be one of %q, %q, or %q, got %q",
+			OperationModeRandom, OperationModeSequence, OperationModeDisabled, c.OperationMode)
 	}
 	if c.MinInstances < 1 {
 		return fmt.Errorf("min instances must be at least 1, got %d", c.MinInstances)
@@ -303,6 +386,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("retain per writer must not be negative, got %d", c.RetainPerWriter)
 	}
 	return nil
+}
+
+func parseOperationSequence(value string) ([]string, error) {
+	parts := strings.Split(value, ",")
+	sequence := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			return nil, fmt.Errorf("operation names must not be empty")
+		}
+		sequence = append(sequence, name)
+	}
+	return sequence, nil
 }
 
 // IsEnabled returns true if the long haul test is explicitly enabled

@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/documentdb/documentdb-operator/test/longhaul/backup"
+	"github.com/documentdb/documentdb-operator/test/longhaul/config"
 	"github.com/documentdb/documentdb-operator/test/longhaul/journal"
 	"github.com/documentdb/documentdb-operator/test/longhaul/monitor"
+	"github.com/documentdb/documentdb-operator/test/longhaul/operations"
 	"github.com/documentdb/documentdb-operator/test/longhaul/workload"
 )
 
@@ -26,9 +28,8 @@ const (
 // It is a pure value snapshot — no live counters, no channels — so it can be
 // passed across goroutines and re-rendered offline.
 type Summary struct {
-	// Result is the current verdict. PASS while data-loss counters stay zero,
-	// flipped to FAIL when the durability oracle detects gaps/checksum errors
-	// or a disruption window blows its policy budget.
+	// Result is the current verdict. It flips to FAIL for durability errors,
+	// operation failures/incomplete sequences, or outage-policy violations.
 	Result Result
 
 	// Duration is wall-clock time since the run started (process StartTime),
@@ -49,13 +50,14 @@ type Summary struct {
 	// only emits a warning annotation.
 	LeakAnalysis monitor.LeakAnalysis
 
-	// OpsExecuted is the count of operations (scale up/down, restart, etc.)
-	// the operations scheduler has run since startup.
+	// OpsExecuted is the count of terminal operation attempts since startup.
 	OpsExecuted int
 
-	// Windows is every disruption window opened during the run, in start
-	// order. Each window records its op, duration, write-failure count, and
-	// whether it exceeded its policy budget.
+	// OperationRun is the bounded sequence result or random aggregate snapshot.
+	OperationRun operations.RunSnapshot
+
+	// Windows is the journal's bounded set of recent closed disruption windows,
+	// in start order.
 	Windows []journal.DisruptionWindow
 
 	// Events is the journal's full event ring (info/warn/error log lines).
@@ -83,6 +85,27 @@ func GenerateMarkdown(s Summary) string {
 	}
 	b.WriteString("\n")
 
+	switch s.OperationRun.Mode {
+	case config.OperationModeSequence:
+		b.WriteString("## Operation Results\n\n")
+		b.WriteString("| # | Operation | Status | Error |\n")
+		b.WriteString("|---|-----------|--------|-------|\n")
+		for i, result := range s.OperationRun.Results {
+			fmt.Fprintf(&b, "| %d | %s | %s | %s |\n",
+				i+1, result.Name, result.Status, markdownCell(result.Error))
+		}
+		b.WriteString("\n")
+	case config.OperationModeRandom:
+		b.WriteString("## Operation Summary\n\n")
+		b.WriteString("| Operation | Passed | Failed |\n")
+		b.WriteString("|-----------|--------|--------|\n")
+		for _, aggregate := range s.OperationRun.Aggregates {
+			fmt.Fprintf(&b, "| %s | %d | %d |\n",
+				aggregate.Name, aggregate.Passed, aggregate.Failed)
+		}
+		b.WriteString("\n")
+	}
+
 	// Data Plane Metrics
 	b.WriteString("## Data Plane Metrics\n\n")
 	b.WriteString("| Metric | Value |\n")
@@ -94,6 +117,7 @@ func GenerateMarkdown(s Summary) string {
 	fmt.Fprintf(&b, "| Verify Passes | %d |\n", s.Metrics.VerifyPasses)
 	fmt.Fprintf(&b, "| Gaps Detected | %d |\n", s.Metrics.GapsDetected)
 	fmt.Fprintf(&b, "| Checksum Errors | %d |\n", s.Metrics.ChecksumErrors)
+	fmt.Fprintf(&b, "| Docs Pruned | %d |\n", s.Metrics.DocsPruned)
 	b.WriteString("\n")
 
 	// Data Protection (ScheduledBackup + retention)
@@ -115,15 +139,16 @@ func GenerateMarkdown(s Summary) string {
 	// Disruption Windows
 	if len(s.Windows) > 0 {
 		b.WriteString("## Disruption Windows\n\n")
-		b.WriteString("| Operation | Duration | Write Failures | Policy Exceeded |\n")
-		b.WriteString("|-----------|----------|----------------|------------------|\n")
+		b.WriteString("| Operation | Duration | Write Failures | Est. Write Outage | Policy Exceeded |\n")
+		b.WriteString("|-----------|----------|----------------|-------------------|------------------|\n")
 		for _, w := range s.Windows {
 			exceeded := "No"
 			if w.ExceededPolicy() {
 				exceeded = "**YES**"
 			}
-			fmt.Fprintf(&b, "| %s | %s | %d | %s |\n",
-				w.OperationName, w.Duration().Round(time.Second), w.WriteFailures, exceeded)
+			fmt.Fprintf(&b, "| %s | %s | %d | %s | %s |\n",
+				w.OperationName, w.Duration().Round(time.Second), w.WriteFailures,
+				w.EstimatedWriteOutage().Round(time.Millisecond), exceeded)
 		}
 		b.WriteString("\n")
 	}
@@ -155,4 +180,12 @@ func GenerateMarkdown(s Summary) string {
 	b.WriteString("```\n")
 
 	return b.String()
+}
+
+func markdownCell(value string) string {
+	if value == "" {
+		return "—"
+	}
+	value = strings.ReplaceAll(value, "|", "\\|")
+	return strings.ReplaceAll(value, "\n", " ")
 }

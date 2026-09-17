@@ -63,7 +63,7 @@ func NewK8sClusterClient(cfg K8sClientConfig) (*K8sClusterClient, error) {
 		return nil, fmt.Errorf("failed to create clientset: %w", err)
 	}
 
-	scheme, err := shareddb.NewScheme()
+	scheme, err := shareddb.NewScheme(cnpgv1.AddToScheme)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build scheme: %w", err)
 	}
@@ -225,6 +225,29 @@ func (k *K8sClusterClient) UpgradeDocumentDB(ctx context.Context, version string
 		spec.SchemaVersion = "auto"
 	}); err != nil {
 		return fmt.Errorf("failed to patch DocumentDB CR: %w", err)
+	}
+	return nil
+}
+
+// GetPrimaryInstance reads status.currentPrimary from the CNPG Cluster that
+// backs this DocumentDB. The CNPG Cluster name equals the DocumentDB CR name,
+// and the returned instance name equals the primary pod name.
+func (k *K8sClusterClient) GetPrimaryInstance(ctx context.Context) (string, error) {
+	var cluster cnpgv1.Cluster
+	key := types.NamespacedName{Namespace: k.namespace, Name: k.clusterName}
+	if err := k.crClient.Get(ctx, key, &cluster); err != nil {
+		return "", fmt.Errorf("failed to get CNPG Cluster: %w", err)
+	}
+	if cluster.Status.CurrentPrimary == "" {
+		return "", fmt.Errorf("CNPG Cluster %s has no current primary yet", k.clusterName)
+	}
+	return cluster.Status.CurrentPrimary, nil
+}
+
+// DeletePod deletes the named pod in the cluster namespace.
+func (k *K8sClusterClient) DeletePod(ctx context.Context, name string) error {
+	if err := k.clientset.CoreV1().Pods(k.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("failed to delete pod %s/%s: %w", k.namespace, name, err)
 	}
 	return nil
 }

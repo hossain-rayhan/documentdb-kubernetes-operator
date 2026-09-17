@@ -15,10 +15,12 @@ import (
 )
 
 const (
-	// pruneInterval is how often the pruner trims old documents. A long-haul
-	// run writes ~10 docs/sec/writer, so a few thousand rows accumulate per
-	// writer between cycles — a small, index-backed DeleteMany each time.
-	pruneInterval = 5 * time.Minute
+	// defaultPruneInterval is how often the pruner trims old documents. A
+	// long-haul run writes ~10 docs/sec/writer, so a few thousand rows
+	// accumulate per writer between cycles — a small, index-backed DeleteMany
+	// each time. Overridable via the Pruner's interval (see StartPruner) so the
+	// smoke gate can prune within a short bounded run.
+	defaultPruneInterval = 5 * time.Minute
 )
 
 // floorProvider reports the highest fully-verified seq per writer. *Verifier
@@ -69,6 +71,7 @@ type Pruner struct {
 	floor           floorProvider
 	backend         pruneBackend
 	retainPerWriter int64
+	interval        time.Duration
 	metrics         *Metrics
 	journal         *journal.Journal
 
@@ -79,13 +82,18 @@ type Pruner struct {
 }
 
 // NewPruner constructs a Pruner. retainPerWriter must be > 0; callers gate on
-// that (0 disables pruning entirely) before constructing.
-func NewPruner(coll *mongo.Collection, writers []*Writer, floor floorProvider, retainPerWriter int64, metrics *Metrics, j *journal.Journal) *Pruner {
+// that (0 disables pruning entirely) before constructing. A non-positive
+// interval falls back to defaultPruneInterval.
+func NewPruner(coll *mongo.Collection, writers []*Writer, floor floorProvider, retainPerWriter int64, interval time.Duration, metrics *Metrics, j *journal.Journal) *Pruner {
+	if interval <= 0 {
+		interval = defaultPruneInterval
+	}
 	return &Pruner{
 		writers:         writers,
 		floor:           floor,
 		backend:         docdbPruneBackend{coll: coll},
 		retainPerWriter: retainPerWriter,
+		interval:        interval,
 		metrics:         metrics,
 		journal:         j,
 	}
@@ -96,7 +104,7 @@ func (p *Pruner) Run(ctx context.Context) {
 	p.journal.Info("pruner", fmt.Sprintf("pruner started (retain %d docs/writer)", p.retainPerWriter))
 	defer p.journal.Info("pruner", "pruner stopped")
 
-	ticker := time.NewTicker(pruneInterval)
+	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
 
 	for {
@@ -146,13 +154,14 @@ func (p *Pruner) pruneWriter(ctx context.Context, writerID string) {
 		return
 	}
 	if deleted > 0 {
+		p.metrics.DocsPruned.Add(deleted)
 		p.journal.Info("pruner", fmt.Sprintf("pruned %d docs for writer %s (seq <= %d)", deleted, writerID, throughSeq))
 	}
 }
 
 // StartPruner launches a single pruner goroutine and returns it.
-func StartPruner(ctx context.Context, coll *mongo.Collection, writers []*Writer, floor floorProvider, retainPerWriter int64, metrics *Metrics, j *journal.Journal) *Pruner {
-	p := NewPruner(coll, writers, floor, retainPerWriter, metrics, j)
+func StartPruner(ctx context.Context, coll *mongo.Collection, writers []*Writer, floor floorProvider, retainPerWriter int64, interval time.Duration, metrics *Metrics, j *journal.Journal) *Pruner {
+	p := NewPruner(coll, writers, floor, retainPerWriter, interval, metrics, j)
 	go p.Run(ctx)
 	return p
 }

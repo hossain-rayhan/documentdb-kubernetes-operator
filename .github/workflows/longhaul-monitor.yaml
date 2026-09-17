@@ -92,6 +92,18 @@ jobs:
           RESULT=$(kubectl get configmap longhaul-report -n ${{ env.NAMESPACE }} -o jsonpath='{.data.result}' 2>/dev/null || echo "UNKNOWN")
           echo "result=$RESULT" >> "$GITHUB_OUTPUT"
 
+          # Durable incident state survives an automatic Deployment restart,
+          # unlike the transient `result` a fresh process resets to RUNNING.
+          # The monitor pages on this so a restart can't hide a past FAIL.
+          INCIDENT_LATCHED=$(kubectl get configmap longhaul-report -n ${{ env.NAMESPACE }} -o jsonpath='{.data.incident-latched}' 2>/dev/null || echo "")
+          echo "incident_latched=$INCIDENT_LATCHED" >> "$GITHUB_OUTPUT"
+          INCIDENT_COUNT=$(kubectl get configmap longhaul-report -n ${{ env.NAMESPACE }} -o jsonpath='{.data.incident-count}' 2>/dev/null || echo "0")
+          echo "incident_count=${INCIDENT_COUNT:-0}" >> "$GITHUB_OUTPUT"
+          LAST_FAILURE_REASON=$(kubectl get configmap longhaul-report -n ${{ env.NAMESPACE }} -o jsonpath='{.data.last-failure-reason}' 2>/dev/null || echo "")
+          echo "last_failure_reason=$LAST_FAILURE_REASON" >> "$GITHUB_OUTPUT"
+          LAST_FAILURE_TIME=$(kubectl get configmap longhaul-report -n ${{ env.NAMESPACE }} -o jsonpath='{.data.last-failure-time}' 2>/dev/null || echo "")
+          echo "last_failure_time=$LAST_FAILURE_TIME" >> "$GITHUB_OUTPUT"
+
           LAST_UPDATED=$(kubectl get configmap longhaul-report -n ${{ env.NAMESPACE }} -o jsonpath='{.data.last-updated}' 2>/dev/null || echo "")
           echo "last_updated=$LAST_UPDATED" >> "$GITHUB_OUTPUT"
 
@@ -110,6 +122,7 @@ jobs:
           echo "Ready / desired:      ${{ steps.deploy-check.outputs.ready }} / ${{ steps.deploy-check.outputs.desired }}"
           echo "Progressing reason:   ${{ steps.deploy-check.outputs.progressing_reason }}"
           echo "Report result:        ${{ steps.report-check.outputs.result }}"
+          echo "Incident latched:     ${{ steps.report-check.outputs.incident_latched }} (count=${{ steps.report-check.outputs.incident_count }})"
           echo "Last updated:         ${{ steps.report-check.outputs.last_updated }}"
           echo ""
           echo "=== Latest Report ==="
@@ -173,9 +186,23 @@ jobs:
             echo "⏳ Report not written yet (deployment age ${DEPLOY_AGE}s < 7200s startup grace); skipping verdict check this run."
           fi
 
-          # Fail if ConfigMap reports failure
+          # Fail if ConfigMap reports failure in the current process.
           if [ "${{ steps.report-check.outputs.result }}" = "FAIL" ]; then
             echo "::error::Long haul test reported FAIL in ConfigMap"
+            exit 1
+          fi
+
+          # Fail if a durable incident was latched at any point, even if the
+          # current `result` is RUNNING/PASS. A failed driver writes FAIL and
+          # exits; the auto-restarted process reports a fresh RUNNING checkpoint,
+          # which would otherwise let this hourly gate miss the incident. The
+          # latched state is monotonic and survives restarts.
+          INCIDENT_LATCHED="${{ steps.report-check.outputs.incident_latched }}"
+          INCIDENT_COUNT="${{ steps.report-check.outputs.incident_count }}"
+          LAST_REASON="${{ steps.report-check.outputs.last_failure_reason }}"
+          LAST_TIME="${{ steps.report-check.outputs.last_failure_time }}"
+          if [ "$INCIDENT_LATCHED" = "true" ] || { [ -n "$INCIDENT_COUNT" ] && [ "$INCIDENT_COUNT" -gt 0 ] 2>/dev/null; }; then
+            echo "::error::Long haul test latched a failure incident (count=${INCIDENT_COUNT}, last='${LAST_REASON}' at ${LAST_TIME}). A driver restart may have reset the live verdict to RUNNING."
             exit 1
           fi
 
@@ -207,7 +234,7 @@ jobs:
     timeout-minutes: 15
     needs: check-longhaul  # Only upgrade if cluster is healthy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up kubeconfig
         env:

@@ -64,6 +64,7 @@ var _ = Describe("Pruner.pruneWriter", func() {
 
 		Expect(b.calls).To(HaveLen(1))
 		Expect(b.calls[0]).To(Equal(pruneCall{writerID: "w000", throughSeq: 8_000}))
+		Expect(m.DocsPruned.Load()).To(Equal(int64(500)))
 	})
 
 	It("does not delete when the floor is below the retention window", func() {

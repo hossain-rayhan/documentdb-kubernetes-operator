@@ -49,6 +49,15 @@ type ClusterClient interface {
 
 	// UpgradeDocumentDB patches spec.documentDBVersion and spec.schemaVersion="auto".
 	UpgradeDocumentDB(ctx context.Context, version string) error
+
+	// GetPrimaryInstance returns the name of the pod currently serving as the
+	// CNPG primary (from Cluster.status.currentPrimary). The pod name equals
+	// the CNPG instance name. Returns an error if no primary is known yet.
+	GetPrimaryInstance(ctx context.Context) (string, error)
+
+	// DeletePod deletes the named pod in the cluster namespace. Used by chaos
+	// operations to inject pod-loss faults.
+	DeletePod(ctx context.Context, name string) error
 }
 
 // HealthMonitor continuously monitors cluster health and tracks steady-state.
@@ -61,6 +70,11 @@ type HealthMonitor struct {
 	lastHealth     ClusterHealth
 	steadySince    time.Time // time when cluster became healthy
 	healthySamples int
+	// invalidateGen is bumped by InvalidateSteadyState. A health sample fetched
+	// before an invalidation must not establish steadySince, so check()
+	// snapshots this generation before its (unlocked) fetch and discards the
+	// sample if the generation moved while the fetch was in flight.
+	invalidateGen uint64
 }
 
 // NewHealthMonitor creates a monitor that polls the cluster for health status.
@@ -91,6 +105,14 @@ func (h *HealthMonitor) Run(ctx context.Context) {
 }
 
 func (h *HealthMonitor) check(ctx context.Context) {
+	// Snapshot the invalidation generation before the (unlocked) fetch so a
+	// disruption that opens while GetClusterHealth is in flight is detected
+	// below and this pre-disruption sample is not allowed to establish a fresh
+	// steady-state epoch.
+	h.mu.RLock()
+	genAtFetch := h.invalidateGen
+	h.mu.RUnlock()
+
 	health, err := h.client.GetClusterHealth(ctx)
 	if err != nil {
 		h.journal.Warn("health", fmt.Sprintf("health check failed: %v", err))
@@ -108,13 +130,21 @@ func (h *HealthMonitor) check(ctx context.Context) {
 
 	isHealthy := health.AllPodsReady && health.CRReady
 
-	if isHealthy {
+	// If an invalidation happened while this sample was being fetched, the
+	// reading predates the disruption. Record it as the latest observation but
+	// do not let it satisfy the steady-state gate; the next fetch (started
+	// after the invalidation) will re-establish steadySince if warranted.
+	staleSample := h.invalidateGen != genAtFetch
+
+	if isHealthy && !staleSample {
 		if h.steadySince.IsZero() {
 			h.steadySince = time.Now()
 		}
 		h.healthySamples++
 	} else {
-		if !h.steadySince.IsZero() {
+		if isHealthy && staleSample {
+			h.journal.Info("health", "discarding pre-disruption health sample after steady-state invalidation")
+		} else if !h.steadySince.IsZero() {
 			h.journal.Warn("health", fmt.Sprintf(
 				"cluster lost steady state: pods=%d/%d cr_ready=%v",
 				health.ReadyPods, health.TotalPods, health.CRReady))
@@ -142,6 +172,22 @@ func (h *HealthMonitor) IsSteadyState() bool {
 		return false
 	}
 	return time.Since(h.steadySince) >= h.steadyStateWait
+}
+
+// InvalidateSteadyState resets the steady-state epoch so the next successful
+// WaitForSteadyState / IsSteadyState must observe a *fresh* continuous-healthy
+// interval: at least one health sample taken after this call, then
+// steadyStateWait of continuous health. Callers invoke it when they open a
+// disruption (e.g. patch the topology or delete a pod) so a stale
+// pre-operation steadySince — the monitor polls on its own, slower cadence —
+// cannot satisfy the post-operation recovery gate before the monitor has
+// actually observed the change.
+func (h *HealthMonitor) InvalidateSteadyState() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.steadySince = time.Time{}
+	h.healthySamples = 0
+	h.invalidateGen++
 }
 
 // LastHealth returns the most recent health observation.

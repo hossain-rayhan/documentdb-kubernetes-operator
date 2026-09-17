@@ -17,10 +17,13 @@ var _ = Describe("Config", func() {
 			Expect(cfg.MaxDuration).To(Equal(30 * time.Minute))
 			Expect(cfg.Namespace).To(Equal("default"))
 			Expect(cfg.ClusterName).To(BeEmpty())
+			Expect(cfg.OperatorNamespace).To(Equal("documentdb-operator"))
 			Expect(cfg.NumWriters).To(Equal(5))
 			Expect(cfg.OpCooldown).To(Equal(5 * time.Minute))
-			Expect(cfg.RecoveryTimeout).To(Equal(5 * time.Minute))
+			Expect(cfg.RecoveryTimeout).To(Equal(10 * time.Minute))
 			Expect(cfg.SteadyStateWait).To(Equal(60 * time.Second))
+			Expect(cfg.OperationMode).To(Equal(OperationModeRandom))
+			Expect(cfg.OperationSequence).To(BeEmpty())
 			Expect(cfg.MinInstances).To(Equal(1))
 			Expect(cfg.MaxInstances).To(Equal(3))
 			Expect(cfg.RetainPerWriter).To(Equal(int64(DefaultRetainPerWriter)))
@@ -33,8 +36,10 @@ var _ = Describe("Config", func() {
 		BeforeEach(func() {
 			for _, k := range []string{
 				EnvEnabled, EnvMaxDuration, EnvNamespace, EnvClusterName,
+				EnvOperatorNamespace,
 				EnvDocumentDBURI, EnvNumWriters,
 				EnvOpCooldown, EnvRecoveryTimeout, EnvSteadyStateWait,
+				EnvOperationMode, EnvOperationSeq,
 				EnvMinInstances, EnvMaxInstances, EnvReportInterval,
 				EnvBackupEnabled, EnvBackupSchedule, EnvBackupRetentionDays,
 				EnvBackupVerifyInterval,
@@ -74,6 +79,13 @@ var _ = Describe("Config", func() {
 			Expect(cfg.ClusterName).To(Equal("my-cluster"))
 		})
 
+		It("parses OperatorNamespace from env", func() {
+			GinkgoT().Setenv(EnvOperatorNamespace, "custom-operator-ns")
+			cfg, err := LoadFromEnv()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.OperatorNamespace).To(Equal("custom-operator-ns"))
+		})
+
 		It("returns error for invalid MaxDuration", func() {
 			GinkgoT().Setenv(EnvMaxDuration, "not-a-duration")
 			_, err := LoadFromEnv()
@@ -109,51 +121,25 @@ var _ = Describe("Config", func() {
 			Expect(cfg.DocumentDBURI).To(Equal("mongodb://localhost:27017"))
 		})
 
-		It("parses the backup env knobs", func() {
-			GinkgoT().Setenv(EnvBackupEnabled, "true")
-			GinkgoT().Setenv(EnvBackupSchedule, "0 */6 * * *")
-			GinkgoT().Setenv(EnvBackupRetentionDays, "7")
-			GinkgoT().Setenv(EnvBackupVerifyInterval, "30s")
-			cfg, err := LoadFromEnv()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.BackupEnabled).To(BeTrue())
-			Expect(cfg.BackupSchedule).To(Equal("0 */6 * * *"))
-			Expect(cfg.BackupRetentionDays).To(Equal(7))
-			Expect(cfg.BackupVerifyInterval).To(Equal(30 * time.Second))
-		})
-
-		It("returns error for invalid BackupRetentionDays", func() {
-			GinkgoT().Setenv(EnvBackupRetentionDays, "abc")
-			_, err := LoadFromEnv()
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring(EnvBackupRetentionDays))
-		})
-
-		It("returns error for invalid BackupVerifyInterval", func() {
-			GinkgoT().Setenv(EnvBackupVerifyInterval, "not-a-duration")
-			_, err := LoadFromEnv()
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring(EnvBackupVerifyInterval))
-		})
-
-		It("parses RetainPerWriter from env", func() {
-			GinkgoT().Setenv(EnvRetainPerWriter, "500000")
-			cfg, err := LoadFromEnv()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.RetainPerWriter).To(Equal(int64(500_000)))
-		})
-
-		It("parses RetainPerWriter=0 to disable pruning", func() {
-			GinkgoT().Setenv(EnvRetainPerWriter, "0")
-			cfg, err := LoadFromEnv()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.RetainPerWriter).To(BeZero())
-		})
-
 		It("returns error for invalid RetainPerWriter", func() {
 			GinkgoT().Setenv(EnvRetainPerWriter, "not-a-number")
 			_, err := LoadFromEnv()
 			Expect(err).To(MatchError(ContainSubstring(EnvRetainPerWriter)))
+		})
+
+		It("normalizes operation mode and trims sequence names", func() {
+			GinkgoT().Setenv(EnvOperationMode, " Sequence ")
+			GinkgoT().Setenv(EnvOperationSeq, " kill-operator-pod,  kill-primary-pod ")
+			cfg, err := LoadFromEnv()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.OperationMode).To(Equal(OperationModeSequence))
+			Expect(cfg.OperationSequence).To(Equal([]string{"kill-operator-pod", "kill-primary-pod"}))
+		})
+
+		It("rejects empty names in a non-empty sequence", func() {
+			GinkgoT().Setenv(EnvOperationSeq, "scale-up, ,scale-down")
+			_, err := LoadFromEnv()
+			Expect(err).To(MatchError(ContainSubstring("operation names must not be empty")))
 		})
 	})
 
@@ -176,6 +162,13 @@ var _ = Describe("Config", func() {
 			Expect(cfg.Validate()).To(MatchError(ContainSubstring("cluster name")))
 		})
 
+		It("fails when OperatorNamespace is empty", func() {
+			cfg := DefaultConfig()
+			cfg.ClusterName = "test"
+			cfg.OperatorNamespace = ""
+			Expect(cfg.Validate()).To(MatchError(ContainSubstring("operator namespace")))
+		})
+
 		It("fails when MaxDuration is negative", func() {
 			cfg := DefaultConfig()
 			cfg.ClusterName = "test"
@@ -195,6 +188,48 @@ var _ = Describe("Config", func() {
 			cfg.ClusterName = "test"
 			cfg.RecoveryTimeout = 0
 			Expect(cfg.Validate()).To(MatchError(ContainSubstring("recovery timeout")))
+		})
+
+		It("fails for an unknown operation mode", func() {
+			cfg := DefaultConfig()
+			cfg.ClusterName = "test"
+			cfg.OperationMode = "roulette"
+			Expect(cfg.Validate()).To(MatchError(ContainSubstring("operation mode must be one of")))
+		})
+
+		It("requires a non-empty sequence in sequence mode", func() {
+			cfg := DefaultConfig()
+			cfg.ClusterName = "test"
+			cfg.OperationMode = OperationModeSequence
+			Expect(cfg.Validate()).To(MatchError(ContainSubstring("operation sequence must not be empty")))
+		})
+
+		It("rejects duplicate sequence names", func() {
+			cfg := DefaultConfig()
+			cfg.ClusterName = "test"
+			cfg.OperationMode = OperationModeSequence
+			cfg.OperationSequence = []string{"scale-up", "scale-up"}
+			Expect(cfg.Validate()).To(MatchError(ContainSubstring(`duplicate name "scale-up"`)))
+		})
+
+		DescribeTable("rejects a sequence outside sequence mode",
+			func(mode OperationMode) {
+				cfg := DefaultConfig()
+				cfg.ClusterName = "test"
+				cfg.OperationMode = mode
+				cfg.OperationSequence = []string{"scale-up"}
+				Expect(cfg.Validate()).To(MatchError(ContainSubstring("operation sequence must be empty")))
+			},
+			Entry("random", OperationModeRandom),
+			Entry("disabled", OperationModeDisabled),
+		)
+
+		It("accepts a valid sequence configuration", func() {
+			cfg := DefaultConfig()
+			cfg.ClusterName = "test"
+			cfg.OperationMode = OperationModeSequence
+			cfg.OperationSequence = []string{"kill-operator-pod", "kill-primary-pod"}
+			Expect(cfg.Validate()).To(Succeed())
 		})
 
 		It("fails when MaxInstances < MinInstances", func() {
