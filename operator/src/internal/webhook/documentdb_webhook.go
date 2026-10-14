@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,8 @@ import (
 )
 
 var documentdbLog = logf.Log.WithName("documentdb-webhook")
+
+var rcImageTagPattern = regexp.MustCompile(`^[vV]?([0-9]+)\.([0-9]+)-[rR][cC][1-9][0-9]*(?:$|[-+])`)
 
 // DocumentDBValidator validates DocumentDB resources on create and update.
 type DocumentDBValidator struct {
@@ -475,11 +478,7 @@ func isBootstrapEqual(a, b *dbpreview.BootstrapConfiguration) bool {
 // Digest-only references (e.g., "image@sha256:...") are not parseable as versions
 // and return "".
 func resolveBinaryVersion(db *dbpreview.DocumentDB) string {
-	if ref := specImageDocumentDB(db); ref != "" {
-		// Ignore digest-only references — they don't carry a version tag
-		if strings.Contains(ref, "@sha256:") {
-			return db.Spec.DocumentDBVersion
-		}
+	if ref := specImageDocumentDB(db); ref != "" && !strings.Contains(ref, "@sha256:") {
 		if tagIdx := strings.LastIndex(ref, ":"); tagIdx >= 0 {
 			tag := ref[tagIdx+1:]
 			// Extract leading semver (X.Y.Z) from tags like "0.112.0-amd64"
@@ -487,6 +486,9 @@ func resolveBinaryVersion(db *dbpreview.DocumentDB) string {
 				return semver
 			}
 		}
+	}
+	if version := extractSemver(db.Spec.DocumentDBVersion); version != "" {
+		return version
 	}
 	return db.Spec.DocumentDBVersion
 }
@@ -523,8 +525,12 @@ func specImageDocumentDB(db *dbpreview.DocumentDB) string {
 }
 
 // extractSemver returns the leading "X.Y.Z" portion from a tag string,
-// or "" if the tag doesn't start with a valid semver pattern.
+// normalizing "X.Y-RC<n>" tags to the extension version "X.Y.0".
+// It returns "" when neither version format is recognized.
 func extractSemver(tag string) string {
+	if matches := rcImageTagPattern.FindStringSubmatch(tag); matches != nil {
+		return matches[1] + "." + matches[2] + ".0"
+	}
 	// Match digits.digits.digits at start of string
 	parts := strings.SplitN(tag, ".", 3)
 	if len(parts) < 3 {

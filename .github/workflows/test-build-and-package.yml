@@ -44,6 +44,7 @@ jobs:
     outputs:
       mode: ${{ steps.probe.outputs.mode }}
       version: ${{ steps.probe.outputs.version }}
+      documentdb_ref: ${{ steps.probe.outputs.documentdb_ref }}
       ext_image_tag: ${{ steps.probe.outputs.ext_image_tag }}
     steps:
     - uses: actions/checkout@v4
@@ -52,21 +53,22 @@ jobs:
       shell: bash
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DOCUMENTDB_GATEWAY_IMAGE_REPO: ghcr.io/documentdb/documentdb/documentdb-local
       run: |
         set -euo pipefail
         # If caller pinned a specific upstream documentdb_ref, always build from
         # source (the registry images may not match the requested ref).
         INPUT_REF="${{ inputs.documentdb_ref }}"
         VALUES_FILE="operator/documentdb-helm-chart/values.yaml"
-        VERSION=$(grep -E '^documentDbVersion:' "$VALUES_FILE" \
+        REGISTRY_VERSION=$(grep -E '^documentDbVersion:' "$VALUES_FILE" \
           | sed -E 's/^documentDbVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/')
-        if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          echo "::error::failed to parse documentDbVersion from $VALUES_FILE (got '$VERSION')"
-          exit 1
-        fi
-        EXT_TAG="${VERSION}-test-${{ github.run_id }}"
-        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-        echo "ext_image_tag=$EXT_TAG" >> "$GITHUB_OUTPUT"
+        RAW_VERSION="$REGISTRY_VERSION" source .github/scripts/resolve-documentdb-version.sh > /dev/null
+        EXT_TAG="${REGISTRY_VERSION}-test-${{ github.run_id }}"
+        {
+          echo "version=$REGISTRY_VERSION"
+          echo "documentdb_ref=${SOURCE_RELEASE_TAG:-v${VERSION_DASH}}"
+          echo "ext_image_tag=$EXT_TAG"
+        } >> "$GITHUB_OUTPUT"
 
         if [[ -n "$INPUT_REF" ]]; then
           echo "Caller pinned documentdb_ref=$INPUT_REF → forcing build mode."
@@ -85,18 +87,18 @@ jobs:
           local count
           # Try org endpoint first, fall back to user endpoint.
           count=$(gh api "/orgs/${OWNER}/packages/container/${pkg}/versions" \
-              --jq "[.[] | select(.metadata.container.tags[]? == \"${VERSION}\")] | length" 2>/dev/null) \
+              --jq "[.[] | select(.metadata.container.tags[]? == \"${REGISTRY_VERSION}\")] | length" 2>/dev/null) \
             || count=$(gh api "/users/${OWNER}/packages/container/${pkg}/versions" \
-              --jq "[.[] | select(.metadata.container.tags[]? == \"${VERSION}\")] | length" 2>/dev/null) \
+              --jq "[.[] | select(.metadata.container.tags[]? == \"${REGISTRY_VERSION}\")] | length" 2>/dev/null) \
             || count=0
           [[ "${count:-0}" -gt 0 ]]
         }
 
         DOC_OK=0; GW_OK=0
-        echo "Probing ghcr.io/${OWNER}/documentdb-kubernetes-operator/documentdb:${VERSION}..."
-        if probe_image documentdb; then DOC_OK=1; echo "  ✓ documentdb:${VERSION} present"; else echo "  ✗ documentdb:${VERSION} missing"; fi
-        echo "Probing ghcr.io/${OWNER}/documentdb-kubernetes-operator/gateway:${VERSION}..."
-        if probe_image gateway; then GW_OK=1; echo "  ✓ gateway:${VERSION} present"; else echo "  ✗ gateway:${VERSION} missing"; fi
+        echo "Probing ghcr.io/${OWNER}/documentdb-kubernetes-operator/documentdb:${REGISTRY_VERSION}..."
+        if probe_image documentdb; then DOC_OK=1; echo "  ✓ documentdb:${REGISTRY_VERSION} present"; else echo "  ✗ documentdb:${REGISTRY_VERSION} missing"; fi
+        echo "Probing ghcr.io/${OWNER}/documentdb-kubernetes-operator/gateway:${REGISTRY_VERSION}..."
+        if probe_image gateway; then GW_OK=1; echo "  ✓ gateway:${REGISTRY_VERSION} present"; else echo "  ✗ gateway:${REGISTRY_VERSION} missing"; fi
 
         if [[ $DOC_OK -eq 1 && $GW_OK -eq 1 ]]; then
           echo "Both images present → registry mode (skip source build)."
@@ -107,7 +109,7 @@ jobs:
         fi
 
   # Compute the extension image tag downstream jobs use. In build mode this is
-  # derived from the compiled deb filename (source of truth); in registry mode
+  # derived from the compiled deb metadata (source of truth); in registry mode
   # it is the chart's documentDbVersion plus the test run-id suffix.
   read-extension-version:
     name: Read Extension Version
@@ -120,6 +122,8 @@ jobs:
     outputs:
       ext_image_tag: ${{ steps.read.outputs.ext_image_tag }}
     steps:
+    - uses: actions/checkout@v4
+      if: needs.probe-images.outputs.mode == 'build'
     - name: Download packages (amd64)
       if: needs.probe-images.outputs.mode == 'build'
       uses: actions/download-artifact@v4
@@ -128,21 +132,31 @@ jobs:
         path: packages/
     - name: Compute extension image tag
       id: read
+      env:
+        DOCUMENTDB_GATEWAY_IMAGE_REPO: ghcr.io/documentdb/documentdb/documentdb-local
       run: |
         set -euo pipefail
         if [[ "${{ needs.probe-images.outputs.mode }}" == "registry" ]]; then
           EXT_TAG="${{ needs.probe-images.outputs.ext_image_tag }}"
           echo "Registry mode: ext_image_tag=$EXT_TAG (from chart documentDbVersion)"
         else
-          DEB_FILE=$(ls packages/ | grep -E 'postgresql.*documentdb.*\.deb' | grep -v dbgsym | head -1)
-          echo "Found deb: $DEB_FILE"
-          # deb filename format: deb13-postgresql-18-documentdb_0.111-0_amd64.deb
-          # Extract version: strip prefix up to 'documentdb_', then take chars before '_<arch>'
-          EXT_VER=$(echo "$DEB_FILE" | sed -n 's/.*documentdb_\([0-9]*\.[0-9]*\)-[0-9]*_.*/\1.0/p')
-          if [[ -z "$EXT_VER" ]]; then
-            echo "::error::Could not extract version from deb filename: $DEB_FILE"
+          DEB_FILE=""
+          for package in packages/*postgresql*documentdb*.deb; do
+            [[ -f "$package" && "$package" != *dbgsym* ]] || continue
+            DEB_FILE="${package##*/}"
+            break
+          done
+          if [[ -z "$DEB_FILE" ]]; then
+            echo "::error::No DocumentDB extension .deb found in packages/"
             exit 1
           fi
+          echo "Found deb: $DEB_FILE"
+          DEB_VERSION=$(dpkg-deb --field "packages/$DEB_FILE" Version)
+          if [[ "$DEB_VERSION" == *~* ]]; then
+            DEB_VERSION="${DEB_VERSION%%-*}"
+          fi
+          RAW_VERSION="$DEB_VERSION" source .github/scripts/resolve-documentdb-version.sh > /dev/null
+          EXT_VER="$VERSION"
           EXT_TAG="${EXT_VER}-test-${{ github.run_id }}"
           echo "Build mode: extension version=$EXT_VER → image tag: $EXT_TAG"
         fi
@@ -257,14 +271,9 @@ jobs:
     env:
       DOCUMENTDB_REPO: documentdb/documentdb
     steps:
-    - name: Checkout operator repo (read chart documentDbVersion)
-      uses: actions/checkout@v4
-      with:
-        path: operator-checkout
-
     - name: Determine DocumentDB ref
       # Pin the documentdb source build to the chart's default documentDbVersion
-      # (formatted as the upstream tag, e.g. 0.109.0 -> v0.109-0). This keeps the
+      # (upstream tags: 0.109.0 -> v0.109-0, 1.0-RC2 -> v1.0-RC2). This keeps the
       # CI build in lock-step with the version the operator chart actually ships,
       # and avoids picking up unstable upstream main where regression tests can
       # flip success/fail per SHA. Callers can still override via the
@@ -278,15 +287,8 @@ jobs:
           REF="$INPUT_REF"
           echo "Using caller-provided documentdb_ref: $REF"
         else
-          VALUES_FILE="operator-checkout/operator/documentdb-helm-chart/values.yaml"
-          VERSION=$(grep -E '^documentDbVersion:' "$VALUES_FILE" \
-            | sed -E 's/^documentDbVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/')
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: failed to parse documentDbVersion from $VALUES_FILE (got '$VERSION')" >&2
-            exit 1
-          fi
-          REF="v${VERSION%.*}-${VERSION##*.}"
-          echo "Derived documentdb ref from chart documentDbVersion=$VERSION -> $REF"
+          REF="${{ needs.probe-images.outputs.documentdb_ref }}"
+          echo "Using documentdb ref resolved from chart: $REF"
         fi
         echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
@@ -389,7 +391,12 @@ jobs:
           echo "✓ documentdb image retagged from registry: $TARGET"
         else
           echo "Build mode: building documentdb Docker image for ${{ matrix.arch }}..."
-          DEB_FILE=$(ls packages/ | grep -E 'postgresql.*documentdb.*\.deb' | grep -v dbgsym | head -1)
+          DEB_FILE=""
+          for package in packages/*postgresql*documentdb*.deb; do
+            [[ -f "$package" && "$package" != *dbgsym* ]] || continue
+            DEB_FILE="${package##*/}"
+            break
+          done
           if [[ -z "$DEB_FILE" ]]; then
             echo "::error::No DocumentDB extension .deb found in packages/"
             ls -la packages/ >&2
@@ -399,7 +406,7 @@ jobs:
           docker buildx build \
             --platform linux/${{ matrix.arch }} \
             --build-arg PG_MAJOR=18 \
-            --build-arg DEB_PACKAGE_REL_PATH=packages/$DEB_FILE \
+            --build-arg "DEB_PACKAGE_REL_PATH=packages/$DEB_FILE" \
             --tag "$TARGET" \
             --load \
             -f .github/dockerfiles/Dockerfile_extension .
@@ -490,7 +497,12 @@ jobs:
           echo "✓ gateway image retagged from registry: $TARGET"
         else
           echo "Build mode: building gateway Docker image for ${{ matrix.arch }}..."
-          GW_DEB=$(ls gateway-context/packages/ | grep -E 'gateway.*\.deb' | head -1)
+          GW_DEB=""
+          for package in gateway-context/packages/*gateway*.deb; do
+            [[ -f "$package" ]] || continue
+            GW_DEB="${package##*/}"
+            break
+          done
           if [[ -z "$GW_DEB" ]]; then
             echo "::error::No gateway .deb found in gateway-context/packages/"
             ls -la gateway-context/packages/ >&2
@@ -499,7 +511,7 @@ jobs:
           echo "Using deb: $GW_DEB"
           docker buildx build \
             --platform linux/${{ matrix.arch }} \
-            --build-arg GATEWAY_DEB_REL_PATH=packages/$GW_DEB \
+            --build-arg "GATEWAY_DEB_REL_PATH=packages/$GW_DEB" \
             --tag "$TARGET" \
             --load \
             -f .github/dockerfiles/Dockerfile_gateway_deb gateway-context

@@ -318,6 +318,21 @@ var _ = Describe("ValidateDelete admission handler", func() {
 })
 
 var _ = Describe("resolveBinaryVersion helper", func() {
+	It("normalizes a promoted RC image tag ahead of a spec version", func() {
+		db := newTestDocumentDB("0.117.0", "", "ghcr.io/documentdb/documentdb:1.0-RC2")
+		Expect(resolveBinaryVersion(db)).To(Equal("1.0.0"))
+	})
+
+	It("normalizes a promoted RC documentDBVersion", func() {
+		db := newTestDocumentDB("1.0-RC2", "", "")
+		Expect(resolveBinaryVersion(db)).To(Equal("1.0.0"))
+	})
+
+	It("normalizes a promoted RC spec version for a digest-only image", func() {
+		db := newTestDocumentDB("1.0-RC2", "", "ghcr.io/documentdb/documentdb@sha256:abc123")
+		Expect(resolveBinaryVersion(db)).To(Equal("1.0.0"))
+	})
+
 	It("prefers the image tag over documentDBVersion", func() {
 		db := newTestDocumentDB("0.110.0", "", "ghcr.io/documentdb/documentdb:0.112.0")
 		Expect(resolveBinaryVersion(db)).To(Equal("0.112.0"))
@@ -355,6 +370,12 @@ var _ = Describe("resolveBinaryVersion helper", func() {
 })
 
 var _ = Describe("resolveEffectiveBinaryVersion helper", func() {
+	It("normalizes the promoted RC operator default to its extension version", func() {
+		GinkgoT().Setenv(util.DOCUMENTDB_VERSION_ENV, "1.0-RC2")
+		db := newTestDocumentDB("", "", "")
+		Expect(resolveEffectiveBinaryVersion(db)).To(Equal("1.0.0"))
+	})
+
 	It("returns the spec version when one is set", func() {
 		db := newTestDocumentDB("0.112.0", "", "")
 		Expect(resolveEffectiveBinaryVersion(db)).To(Equal("0.112.0"))
@@ -389,6 +410,29 @@ var _ = Describe("resolveEffectiveBinaryVersion helper", func() {
 })
 
 var _ = Describe("extractSemver helper", func() {
+	DescribeTable("normalizes RC image tags to extension versions", func(tag, version string) {
+		Expect(extractSemver(tag)).To(Equal(version))
+	},
+		Entry("promoted RC2", "1.0-RC2", "1.0.0"),
+		Entry("lowercase RC", "1.0-rc2", "1.0.0"),
+		Entry("architecture suffix", "1.0-RC2-amd64", "1.0.0"),
+		Entry("candidate suffix", "1.0-rc2-build-38421263548-1-b1f52b5", "1.0.0"),
+		Entry("v-prefixed RC", "v1.0-RC2", "1.0.0"),
+		Entry("multi-digit RC", "1.0-RC12", "1.0.0"),
+		Entry("explicit patch RC", "1.0.1-RC2", "1.0.1"),
+	)
+
+	DescribeTable("rejects unrecognized two-component version tags", func(tag string) {
+		Expect(extractSemver(tag)).To(BeEmpty())
+	},
+		Entry("missing RC suffix", "1.0"),
+		Entry("missing RC number", "1.0-RC"),
+		Entry("zero RC number", "1.0-RC0"),
+		Entry("leading-zero RC number", "1.0-RC02"),
+		Entry("invalid RC suffix", "1.0-RC2extra"),
+		Entry("unknown suffix", "1.0-latest"),
+	)
+
 	It("extracts clean semver", func() {
 		Expect(extractSemver("0.112.0")).To(Equal("0.112.0"))
 	})
@@ -652,6 +696,23 @@ func newPVWithSchema(name, schemaVersion string) *corev1.PersistentVolume {
 
 var _ = Describe("restore schema compatibility validation", func() {
 	ctx := context.Background()
+
+	DescribeTable("enforces backup schema compatibility with the promoted RC default", func(schemaVersion string, errorCount int) {
+		GinkgoT().Setenv(util.DOCUMENTDB_VERSION_ENV, "1.0-RC2")
+		backup := newBackupWithSchema("bk", schemaVersion)
+		validator := newValidatorWithObjects(backup)
+		db := newRestoreDocumentDB("restored", "", "bk")
+		warnings, errs := validator.validateRestoreSchemaCompatibility(ctx, db)
+		Expect(warnings).To(BeEmpty())
+		Expect(errs).To(HaveLen(errorCount))
+		if errorCount > 0 {
+			Expect(errs[0].Detail).To(ContainSubstring("older than the backup's schema version"))
+		}
+	},
+		Entry("equal schema", "1.0.0", 0),
+		Entry("older schema", "0.117.0", 0),
+		Entry("newer schema", "1.0.1", 1),
+	)
 
 	It("is a no-op when there is no bootstrap recovery", func() {
 		v := newValidatorWithObjects()
