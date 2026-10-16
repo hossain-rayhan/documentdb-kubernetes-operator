@@ -3,6 +3,7 @@ name: RELEASE - Build DocumentDB Candidate Images
 # Builds documentdb extension and gateway images from published DocumentDB artifacts.
 # - documentdb image: Debian 13 (trixie) PostgreSQL 18 extension package from the
 #   PGDG APT repository for stable releases, or pinned upstream source for RCs
+#   (and for stable releases when package_source=source)
 # - gateway image: public documentdb-local image payload
 # These images follow the DATABASE version track (documentDbVersion in values.yaml).
 # For operator/sidecar images, see build_operator_images.yml.
@@ -25,6 +26,12 @@ on:
         description: 'APT suite (distribution) to resolve the Debian 13 package from'
         required: false
         default: 'trixie-pgdg'
+      package_source:
+        description: 'Extension package source for stable versions (RCs always build from source)'
+        required: false
+        default: 'auto'
+        type: choice
+        options: [auto, apt, source]
       documentdb_gateway_image_repo:
         description: 'Container image repo for gateway source (without tag)'
         required: false
@@ -88,11 +95,12 @@ jobs:
       id: version
       env:
         RAW_VERSION: ${{ github.event.inputs.version || github.event.client_payload.version || env.DEFAULT_DOCUMENTDB_VERSION }}
+        DOCUMENTDB_PACKAGE_SOURCE: ${{ github.event.inputs.package_source || github.event.client_payload.package_source || 'auto' }}
       run: |
         set -euo pipefail
         bash .github/scripts/resolve-documentdb-version.sh | tee -a "$GITHUB_OUTPUT"
 
-    - name: Checkout upstream RC release
+    - name: Checkout pinned upstream release
       if: steps.version.outputs.package_source == 'source'
       uses: actions/checkout@v4
       with:
@@ -102,7 +110,7 @@ jobs:
         submodules: recursive
         persist-credentials: false
 
-    - name: Pin RC source and verify schema
+    - name: Pin upstream source and verify schema
       if: steps.version.outputs.package_source == 'source'
       id: source
       env:
@@ -114,14 +122,14 @@ jobs:
         SCHEMA_VERSION=$(sed -nE "s/^default_version[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" \
           documentdb-source/pg_documentdb/documentdb.control)
         [[ "$SCHEMA_VERSION" == "$EXPECTED_SCHEMA_VERSION" ]] || {
-          echo "RC source declares schema '$SCHEMA_VERSION', expected '$EXPECTED_SCHEMA_VERSION'" >&2
+          echo "Upstream source declares schema '$SCHEMA_VERSION', expected '$EXPECTED_SCHEMA_VERSION'" >&2
           exit 1
         }
         {
           echo "source_commit=$SOURCE_COMMIT"
           echo "source_date_epoch=$SOURCE_DATE_EPOCH"
         } >> "$GITHUB_OUTPUT"
-        echo "Pinned RC source: $SOURCE_COMMIT (schema $SCHEMA_VERSION)"
+        echo "Pinned upstream source: $SOURCE_COMMIT (schema $SCHEMA_VERSION)"
 
     # Pin one package version (and SHA256) for both arches before any image build.
     - name: Resolve extension package in APT repository
@@ -258,7 +266,7 @@ jobs:
         echo "${DEB_SHA256}  ${DEB_FILE}" | sha256sum -c -
         echo "DEB_PACKAGE_REL_PATH=$DEB_FILE" >> "$GITHUB_ENV"
 
-    - name: Checkout pinned upstream RC source
+    - name: Checkout pinned upstream source
       if: matrix.image.name == 'documentdb' && needs.resolve-public-artifacts.outputs.package_source == 'source'
       uses: actions/checkout@v4
       with:
@@ -268,7 +276,7 @@ jobs:
         submodules: recursive
         persist-credentials: false
 
-    - name: Build Debian 13 PostgreSQL 18 RC package
+    - name: Build Debian 13 PostgreSQL 18 package from source
       if: matrix.image.name == 'documentdb' && needs.resolve-public-artifacts.outputs.package_source == 'source'
       env:
         PACKAGE: postgresql-${{ env.DOCUMENTDB_PG_MAJOR }}-documentdb
@@ -278,8 +286,13 @@ jobs:
       run: |
         set -euo pipefail
         cd documentdb-source
+        # Older release tags' builders reject --no-dbgsym.
+        EXTRA_ARGS=()
+        if grep -q -- '--no-dbgsym' packaging/build_packages.sh; then
+          EXTRA_ARGS+=(--no-dbgsym)
+        fi
         ./packaging/build_packages.sh --os deb13 --pg "$DOCUMENTDB_PG_MAJOR" \
-          --version "$DEB_VERSION" --no-dbgsym --output-dir packages
+          --version "$DEB_VERSION" "${EXTRA_ARGS[@]}" --output-dir packages
         cd "$GITHUB_WORKSPACE"
         mkdir -p packages
         DEB_FILE="packages/${PACKAGE}_${DEB_VERSION}_${EXPECTED_ARCH}.deb"
@@ -426,9 +439,12 @@ jobs:
           echo "- **DocumentDB Version**: \`${{ needs.resolve-public-artifacts.outputs.documentdb_version }}\`"
           echo "- **Candidate Image Tag**: \`${{ needs.resolve-public-artifacts.outputs.image_tag }}\`"
           echo "- **Extension Package**: \`postgresql-${{ env.DOCUMENTDB_PG_MAJOR }}-documentdb ${{ needs.resolve-public-artifacts.outputs.extension_deb_version }}\` (amd64, arm64)"
+          IS_RC=false
+          if [[ "$SOURCE_RELEASE_TAG" == *-RC* ]]; then
+            IS_RC=true
+          fi
           if [[ "$PACKAGE_SOURCE" == source ]]; then
             echo "- **Extension Package Source**: Debian 13 / PostgreSQL 18 build from \`documentdb/documentdb ${SOURCE_RELEASE_TAG}@${SOURCE_COMMIT}\`"
-            echo "- **RC Safety**: Fresh instances only; upgrades from older versions, between RCs, or to GA are unsupported."
           else
             echo "- **Extension Package Source**: \`${{ env.DOCUMENTDB_APT_BASE_URL }} ${{ env.DOCUMENTDB_APT_SUITE }}/${{ env.DOCUMENTDB_APT_COMPONENT }}\`"
           fi
@@ -436,8 +452,11 @@ jobs:
           echo "- **Gateway Source Image**: \`${{ needs.resolve-public-artifacts.outputs.gateway_source_image }}\`"
           echo "- **Image Repository Prefix**: \`${IMAGE_REPOSITORY}\`"
           echo "- **Images**: documentdb, gateway"
+          if [[ "$IS_RC" == true ]]; then
+            echo "- **RC Safety**: Fresh instances only; upgrades from older versions, between RCs, or to GA are unsupported."
+          fi
           echo ""
-          if [[ "$PACKAGE_SOURCE" == source ]]; then
+          if [[ "$IS_RC" == true ]]; then
             echo "Review \`release_documentdb_images.yml\` RC/default-version handling before promotion; do not change stable defaults without approval."
           else
             echo "To release these images, run \`release_documentdb_images.yml\` with:"
