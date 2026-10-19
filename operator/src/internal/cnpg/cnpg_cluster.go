@@ -5,8 +5,10 @@ package cnpg
 
 import (
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/go-logr/logr"
@@ -101,6 +103,7 @@ func GetCnpgClusterSpecFromIntent(req ctrl.Request, intent product.ClusterIntent
 					addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_MEMORY_LIMIT, split.Gateway.MemoryLimit)
 					addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_CPU_REQUEST, split.Gateway.CPURequest)
 					addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_CPU_LIMIT, split.Gateway.CPULimit)
+					addGatewayContractParams(params, intent.Product.Gateway)
 					// If TLS is ready, surface secret name to plugin so it can mount certs.
 					if intent.TLS.GatewaySecret != "" {
 						params[util.PLUGIN_PARAM_GATEWAY_TLS_SECRET] = intent.TLS.GatewaySecret
@@ -415,4 +418,21 @@ func buildPostgresConfiguration(intent product.ClusterIntent, extensionImageSour
 		Parameters:          MergeParametersFor(intent, pgMemoryBytes),
 		PgHBA:               pg.PgHBA,
 	}
+}
+
+// addGatewayContractParams forwards a product's non-default gateway contract to
+// the sidecar injector. Unset fields are omitted so the injector keeps its
+// DocumentDB gateway defaults and existing parameter maps are unchanged.
+func addGatewayContractParams(params map[string]string, gw product.GatewayProfile) {
+	addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_CONTAINER_NAME, gw.ContainerName)
+	if gw.Port > 0 {
+		params[util.PLUGIN_PARAM_GATEWAY_PORT] = strconv.FormatInt(int64(gw.Port), 10)
+	}
+	if gw.Args != nil {
+		// json.Marshal of a []string cannot fail.
+		args, _ := json.Marshal(gw.Args)
+		params[util.PLUGIN_PARAM_GATEWAY_ARGS] = string(args)
+	}
+	addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_USERNAME_ENV, gw.UsernameEnv)
+	addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_PASSWORD_ENV, gw.PasswordEnv)
 }

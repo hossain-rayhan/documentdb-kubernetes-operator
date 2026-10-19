@@ -39,6 +39,26 @@ type ProductProfile struct {
 	// Postgres is the product's PostgreSQL contract: extension, libraries,
 	// bootstrap SQL, host-based auth, and operator-forced GUCs.
 	Postgres PostgresProfile
+
+	// Gateway is the product's gateway sidecar contract. Zero values keep the
+	// sidecar injector's DocumentDB gateway defaults.
+	Gateway GatewayProfile
+}
+
+// GatewayProfile describes how the sidecar injector runs the product gateway.
+// Every field is optional; an empty value is not sent to the plugin so the
+// injector falls back to its DocumentDB gateway defaults.
+type GatewayProfile struct {
+	// ContainerName is the injected gateway container name.
+	ContainerName string
+	// Port is the gateway container port.
+	Port int32
+	// Args, when non-nil, replaces the DocumentDB gateway arguments verbatim.
+	Args []string
+	// UsernameEnv and PasswordEnv are the env var names the credential
+	// secret's username/password keys are exposed as.
+	UsernameEnv string
+	PasswordEnv string
 }
 
 // ExtensionSpec describes the product's PostgreSQL extension, mounted from the

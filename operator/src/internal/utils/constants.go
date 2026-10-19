@@ -124,6 +124,12 @@ const (
 	PLUGIN_PARAM_OTEL_MEMORY_LIMIT      = "otelMemoryLimit"
 	PLUGIN_PARAM_OTEL_CPU_REQUEST       = "otelCpuRequest"
 	PLUGIN_PARAM_OTEL_CPU_LIMIT         = "otelCpuLimit"
+	// Optional gateway contract overrides; omitted for the DocumentDB gateway.
+	PLUGIN_PARAM_GATEWAY_CONTAINER_NAME = "gatewayContainerName"
+	PLUGIN_PARAM_GATEWAY_PORT           = "gatewayPort"
+	PLUGIN_PARAM_GATEWAY_ARGS           = "gatewayArgs"
+	PLUGIN_PARAM_GATEWAY_USERNAME_ENV   = "gatewayUsernameEnv"
+	PLUGIN_PARAM_GATEWAY_PASSWORD_ENV   = "gatewayPasswordEnv"
 
 	// TODO: remove these constants once change stream support is included in the official images.
 	CHANGESTREAM_DOCUMENTDB_IMAGE_REPOSITORY = "ghcr.io/wentingwu666666/documentdb-kubernetes-operator"
