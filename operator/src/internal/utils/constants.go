@@ -106,6 +106,16 @@ const (
 	// The operator passes the resolved per-container requests/limits to the
 	// sidecar-injector plugin via these CNPG plugin parameters; the plugin sets
 	// them on the gateway and otel-collector container Resources.
+	PLUGIN_PARAM_GATEWAY_IMAGE             = "gatewayImage"
+	PLUGIN_PARAM_GATEWAY_IMAGE_PULL_POLICY = "gatewayImagePullPolicy"
+	PLUGIN_PARAM_GATEWAY_TLS_SECRET        = "gatewayTLSSecret"
+	// PLUGIN_PARAM_CREDENTIAL_SECRET keeps its historical key: it is a wire
+	// contract with the sidecar injector and existing clusters.
+	PLUGIN_PARAM_CREDENTIAL_SECRET      = "documentDbCredentialSecret"
+	PLUGIN_PARAM_OTEL_COLLECTOR_IMAGE   = "otelCollectorImage"
+	PLUGIN_PARAM_OTEL_CONFIG_MAP_NAME   = "otelConfigMapName"
+	PLUGIN_PARAM_OTEL_CONFIG_HASH       = "otelConfigHash"
+	PLUGIN_PARAM_PROMETHEUS_PORT        = "prometheusPort"
 	PLUGIN_PARAM_GATEWAY_MEMORY_REQUEST = "gatewayMemoryRequest"
 	PLUGIN_PARAM_GATEWAY_MEMORY_LIMIT   = "gatewayMemoryLimit"
 	PLUGIN_PARAM_GATEWAY_CPU_REQUEST    = "gatewayCpuRequest"

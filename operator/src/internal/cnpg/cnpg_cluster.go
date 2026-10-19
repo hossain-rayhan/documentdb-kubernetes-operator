@@ -91,11 +91,11 @@ func GetCnpgClusterSpecFromIntent(req ctrl.Request, intent product.ClusterIntent
 				InheritedMetadata: getInheritedMetadataLabels(intent.Identity.Name),
 				Plugins: func() []cnpgv1.PluginConfiguration {
 					params := map[string]string{
-						"gatewayImage":               gatewayImage,
-						"documentDbCredentialSecret": credentialSecretName,
+						util.PLUGIN_PARAM_GATEWAY_IMAGE:     gatewayImage,
+						util.PLUGIN_PARAM_CREDENTIAL_SECRET: credentialSecretName,
 					}
 					if pullPolicy := intent.Images.GatewayPullPolicy; pullPolicy != "" {
-						params["gatewayImagePullPolicy"] = pullPolicy
+						params[util.PLUGIN_PARAM_GATEWAY_IMAGE_PULL_POLICY] = pullPolicy
 					}
 					addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_MEMORY_REQUEST, split.Gateway.MemoryRequest)
 					addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_MEMORY_LIMIT, split.Gateway.MemoryLimit)
@@ -103,26 +103,26 @@ func GetCnpgClusterSpecFromIntent(req ctrl.Request, intent product.ClusterIntent
 					addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_CPU_LIMIT, split.Gateway.CPULimit)
 					// If TLS is ready, surface secret name to plugin so it can mount certs.
 					if intent.TLS.GatewaySecret != "" {
-						params["gatewayTLSSecret"] = intent.TLS.GatewaySecret
+						params[util.PLUGIN_PARAM_GATEWAY_TLS_SECRET] = intent.TLS.GatewaySecret
 					}
 					// Pass monitoring parameters to plugin for OTel sidecar injection.
 					// Sidecar is only injected when monitoring is enabled.
 					// Config hash triggers operator-initiated rolling restart on config changes.
 					if split.MonitoringEnabled {
-						params["otelCollectorImage"] = util.OtelCollectorImage()
-						params["otelConfigMapName"] = otelcfg.ConfigMapName(intent.Identity.Name)
+						params[util.PLUGIN_PARAM_OTEL_COLLECTOR_IMAGE] = util.OtelCollectorImage()
+						params[util.PLUGIN_PARAM_OTEL_CONFIG_MAP_NAME] = otelcfg.ConfigMapName(intent.Identity.Name)
 						addPluginParamIfSet(params, util.PLUGIN_PARAM_OTEL_MEMORY_REQUEST, split.OTel.MemoryRequest)
 						addPluginParamIfSet(params, util.PLUGIN_PARAM_OTEL_MEMORY_LIMIT, split.OTel.MemoryLimit)
 						addPluginParamIfSet(params, util.PLUGIN_PARAM_OTEL_CPU_REQUEST, split.OTel.CPURequest)
 						addPluginParamIfSet(params, util.PLUGIN_PARAM_OTEL_CPU_LIMIT, split.OTel.CPULimit)
 						if promPort := otelcfg.ResolvePrometheusPort(intent.Monitoring); promPort > 0 {
-							params["prometheusPort"] = fmt.Sprintf("%d", promPort)
+							params[util.PLUGIN_PARAM_PROMETHEUS_PORT] = fmt.Sprintf("%d", promPort)
 						}
 						// Compute config hash for change detection. The operator triggers a
 						// rolling restart (via restart annotation) when plugin parameters
 						// change, ensuring pods pick up new config.
 						if configData, err := otelcfg.GenerateConfigMapData(intent.Identity.Name, req.Namespace, intent.Monitoring); err == nil {
-							params["otelConfigHash"] = otelcfg.HashConfigMapData(configData)
+							params[util.PLUGIN_PARAM_OTEL_CONFIG_HASH] = otelcfg.HashConfigMapData(configData)
 						} else {
 							log.Error(err, "Failed to generate OTel config hash; config changes may not trigger rolling restart")
 						}
