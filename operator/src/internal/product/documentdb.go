@@ -73,6 +73,26 @@ func (a DocumentDBAdapter) GatewayImage(db *dbpreview.DocumentDB) string {
 	)
 }
 
+// DocumentDBResources maps spec.resource of a DocumentDB onto the neutral
+// resource model consumed by the resource split and validation.
+func DocumentDBResources(db *dbpreview.DocumentDB) Resources {
+	res := db.Spec.Resource
+	return Resources{
+		Memory:   res.Memory,
+		CPU:      res.CPU,
+		Database: toComponentResources(res.Database),
+		Gateway:  toComponentResources(res.Gateway),
+		OTel:     toComponentResources(res.OTel),
+	}
+}
+
+func toComponentResources(c *dbpreview.ComponentResources) *ComponentResources {
+	if c == nil {
+		return nil
+	}
+	return &ComponentResources{Memory: c.Memory, CPU: c.CPU}
+}
+
 // ToClusterIntent maps a DocumentDB custom resource onto the product-neutral
 // ClusterIntent, resolving product-varying images, credential secret, and plugin
 // names via the product profile.

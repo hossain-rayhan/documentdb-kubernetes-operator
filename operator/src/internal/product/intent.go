@@ -37,6 +37,25 @@ type Storage struct {
 	PvcSize string
 }
 
+// ComponentResources is an optional per-container memory/CPU override.
+// Empty or "0" values mean "unset".
+type ComponentResources struct {
+	Memory string
+	CPU    string
+}
+
+// Resources is the pod resource envelope and optional per-container overrides
+// the operator splits across the PostgreSQL, gateway, and OTel containers.
+type Resources struct {
+	// Memory and CPU are the optional pod-level envelopes.
+	Memory string
+	CPU    string
+	// Database, Gateway, and OTel are optional per-container overrides.
+	Database *ComponentResources
+	Gateway  *ComponentResources
+	OTel     *ComponentResources
+}
+
 // Identity carries the owning custom resource's identity for owner references
 // and resource labels.
 type Identity struct {
