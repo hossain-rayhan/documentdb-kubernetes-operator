@@ -1,0 +1,49 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+package cnpg
+
+import (
+	"testing"
+
+	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+	corev1 "k8s.io/api/core/v1"
+
+	util "github.com/documentdb/documentdb-operator/internal/utils"
+)
+
+func TestExtensionLifecycleSQLUsesProductNames(t *testing.T) {
+	cases := map[string]string{
+		ExtensionVersionSQL("pgcosmos"):         "SELECT default_version, installed_version FROM pg_available_extensions WHERE name = 'pgcosmos'",
+		ExtensionUpdateSQL("pgcosmos", ""):      "ALTER EXTENSION pgcosmos UPDATE",
+		ExtensionUpdateSQL("pgcosmos", "1.2-0"): "ALTER EXTENSION pgcosmos UPDATE TO '1.2-0'",
+		ReplicationRoleCheckSQL("cosmos_admin"): "SELECT 1 FROM pg_roles WHERE rolname = 'streaming_replica' AND pg_has_role('streaming_replica', 'cosmos_admin', 'USAGE');",
+		ReplicationRoleGrantSQL("cosmos_admin"): "GRANT cosmos_admin TO streaming_replica;",
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestClusterImageReaders(t *testing.T) {
+	cluster := &cnpgv1.Cluster{Spec: cnpgv1.ClusterSpec{
+		PostgresConfiguration: cnpgv1.PostgresConfiguration{Extensions: []cnpgv1.ExtensionConfiguration{
+			{Name: "pgcosmos", ImageVolumeSource: corev1.ImageVolumeSource{Reference: "reg/pgcosmos:1"}},
+		}},
+		Plugins: []cnpgv1.PluginConfiguration{{Parameters: map[string]string{util.PLUGIN_PARAM_GATEWAY_IMAGE: "reg/gw:1"}}},
+	}}
+	if got := ExtensionImage(cluster, "pgcosmos"); got != "reg/pgcosmos:1" {
+		t.Errorf("ExtensionImage = %q", got)
+	}
+	if got := ExtensionImage(cluster, "documentdb"); got != "" {
+		t.Errorf("ExtensionImage(other) = %q, want empty", got)
+	}
+	if got := GatewayImage(cluster); got != "reg/gw:1" {
+		t.Errorf("GatewayImage = %q", got)
+	}
+	if got := GatewayImage(&cnpgv1.Cluster{}); got != "" {
+		t.Errorf("GatewayImage(no plugins) = %q, want empty", got)
+	}
+}

@@ -225,20 +225,19 @@ func (r *DocumentDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if slices.Contains(currentCnpgCluster.Status.InstancesStatus[cnpgv1.PodHealthy], currentCnpgCluster.Status.CurrentPrimary) && replicationContext.IsPrimary() {
-		// Check if permissions have already been granted
-		checkCommand := "SELECT 1 FROM pg_roles WHERE rolname = 'streaming_replica' AND pg_has_role('streaming_replica', 'documentdb_admin_role', 'USAGE');"
-		output, err := r.SQLExecutor(ctx, currentCnpgCluster, checkCommand)
-		if err != nil {
-			logger.Error(err, "Failed to check if permissions already granted")
-			return ctrl.Result{RequeueAfter: RequeueAfterLong}, nil
-		}
+		if role := intent.Product.Postgres.ReplicationAdminRole; role != "" {
+			// Check if permissions have already been granted
+			output, err := r.SQLExecutor(ctx, currentCnpgCluster, cnpg.ReplicationRoleCheckSQL(role))
+			if err != nil {
+				logger.Error(err, "Failed to check if permissions already granted")
+				return ctrl.Result{RequeueAfter: RequeueAfterLong}, nil
+			}
 
-		if !strings.Contains(output, "(1 row)") {
-			grantCommand := "GRANT documentdb_admin_role TO streaming_replica;"
-
-			if _, err := r.SQLExecutor(ctx, currentCnpgCluster, grantCommand); err != nil {
-				logger.Error(err, "Failed to grant permissions to streaming_replica")
-				return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
+			if !strings.Contains(output, "(1 row)") {
+				if _, err := r.SQLExecutor(ctx, currentCnpgCluster, cnpg.ReplicationRoleGrantSQL(role)); err != nil {
+					logger.Error(err, "Failed to grant permissions to streaming_replica")
+					return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
+				}
 			}
 		}
 	}
@@ -801,10 +800,10 @@ func (r *DocumentDBReconciler) handleExtensionUpgrade(ctx context.Context, curre
 	}
 
 	// Check if ALTER EXTENSION UPDATE is needed
-	checkVersionSQL := "SELECT default_version, installed_version FROM pg_available_extensions WHERE name = 'documentdb'"
-	output, err := r.SQLExecutor(ctx, currentCluster, checkVersionSQL)
+	extension := documentDBExtensionName()
+	output, err := r.SQLExecutor(ctx, currentCluster, cnpg.ExtensionVersionSQL(extension))
 	if err != nil {
-		return fmt.Errorf("failed to check documentdb extension versions: %w", err)
+		return fmt.Errorf("failed to check %s extension versions: %w", extension, err)
 	}
 
 	defaultVersion, installedVersion, ok := parseExtensionVersionsFromOutput(output)
@@ -878,7 +877,7 @@ func (r *DocumentDBReconciler) handleExtensionUpgrade(ctx context.Context, curre
 		"toVersion", schemaTarget)
 
 	if _, err := r.SQLExecutor(ctx, currentCluster, updateSQL); err != nil {
-		return fmt.Errorf("failed to run ALTER EXTENSION documentdb UPDATE: %w", err)
+		return fmt.Errorf("failed to run ALTER EXTENSION %s UPDATE: %w", extension, err)
 	}
 
 	logger.Info("Successfully upgraded DocumentDB extension",
@@ -935,7 +934,7 @@ func (r *DocumentDBReconciler) determineSchemaTarget(
 
 	case specSchemaVersion == "auto":
 		// Auto-finalize: update schema to match binary version
-		return binaryVersion, "ALTER EXTENSION documentdb UPDATE"
+		return binaryVersion, cnpg.ExtensionUpdateSQL(documentDBExtensionName(), "")
 
 	default:
 		// Explicit version: update to that specific version.
@@ -977,7 +976,7 @@ func (r *DocumentDBReconciler) determineSchemaTarget(
 		// which produces a "Major.Minor-Patch" string (e.g., "0.112-0"). The input is validated
 		// by the CRD schema regex pattern and the validating webhook's version parsing, so it
 		// contains only digits, dots, and hyphens — no SQL injection risk.
-		return targetPgVersion, fmt.Sprintf("ALTER EXTENSION documentdb UPDATE TO '%s'", targetPgVersion)
+		return targetPgVersion, cnpg.ExtensionUpdateSQL(documentDBExtensionName(), targetPgVersion)
 	}
 }
 
@@ -985,20 +984,8 @@ func (r *DocumentDBReconciler) determineSchemaTarget(
 // and persists them into the DocumentDB status fields. This is a no-op if both fields
 // are already up to date.
 func (r *DocumentDBReconciler) updateImageStatus(ctx context.Context, documentdb *dbpreview.DocumentDB, cluster *cnpgv1.Cluster) error {
-	// Read current extension image
-	currentExtImage := ""
-	for _, ext := range cluster.Spec.PostgresConfiguration.Extensions {
-		if ext.Name == "documentdb" {
-			currentExtImage = ext.ImageVolumeSource.Reference
-			break
-		}
-	}
-
-	// Read current gateway image
-	currentGwImage := ""
-	if len(cluster.Spec.Plugins) > 0 && cluster.Spec.Plugins[0].Parameters != nil {
-		currentGwImage = cluster.Spec.Plugins[0].Parameters["gatewayImage"]
-	}
+	currentExtImage := cnpg.ExtensionImage(cluster, documentDBExtensionName())
+	currentGwImage := cnpg.GatewayImage(cluster)
 
 	// Only update if something changed
 	if documentdb.Status.DocumentDBImage == currentExtImage && documentdb.Status.GatewayImage == currentGwImage {
@@ -1066,4 +1053,10 @@ func (r *DocumentDBReconciler) deleteOtelConfigMap(ctx context.Context, clusterN
 	}
 	logger.Info("OTel ConfigMap deleted", "name", cmName)
 	return nil
+}
+
+// documentDBExtensionName is the PostgreSQL extension whose lifecycle this
+// reconciler manages, taken from the DocumentDB product profile.
+func documentDBExtensionName() string {
+	return product.DocumentDBProfile().Postgres.Extension.Name
 }
