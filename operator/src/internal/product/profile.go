@@ -35,6 +35,41 @@ type ProductProfile struct {
 	// operator wires onto the rendered Cluster.
 	SidecarInjectorPlugin string
 	WALReplicaPlugin      string
+
+	// Postgres is the product's PostgreSQL contract: extension, libraries,
+	// bootstrap SQL, host-based auth, and operator-forced GUCs.
+	Postgres PostgresProfile
+}
+
+// ExtensionSpec describes the product's PostgreSQL extension, mounted from the
+// extension image through CNPG's ImageVolume extension support.
+type ExtensionSpec struct {
+	// Name is the CNPG extension entry name and the PostgreSQL extension name
+	// used for CREATE/ALTER EXTENSION and version discovery.
+	Name string
+	// DynamicLibraryPath, ExtensionControlPath, and LdLibraryPath are the
+	// image-relative paths CNPG adds to the PostgreSQL search paths.
+	DynamicLibraryPath   []string
+	ExtensionControlPath []string
+	LdLibraryPath        []string
+}
+
+// PostgresProfile captures the product-wide PostgreSQL contract.
+type PostgresProfile struct {
+	// Extension is the product extension mounted from the extension image.
+	Extension ExtensionSpec
+	// AdditionalLibraries are added to shared_preload_libraries.
+	AdditionalLibraries []string
+	// BootstrapSQL runs once at initdb, before any user PostInitSQL.
+	BootstrapSQL []string
+	// PgHBA is the host-based authentication configuration.
+	PgHBA []string
+	// ProtectedParameters are product GUCs the operator always forces, on top
+	// of the core protected set.
+	ProtectedParameters map[string]string
+	// ReplicationAdminRole, when set, is granted to CNPG's streaming_replica
+	// user so physical replicas can read product-owned objects.
+	ReplicationAdminRole string
 }
 
 // Adapter is the product-neutral contract shared by every product integration:

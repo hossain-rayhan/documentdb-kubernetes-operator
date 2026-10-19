@@ -22,8 +22,33 @@ func DocumentDBProfile() ProductProfile {
 		DefaultCredentialSecret: util.DEFAULT_DOCUMENTDB_CREDENTIALS_SECRET,
 		SidecarInjectorPlugin:   util.DEFAULT_SIDECAR_INJECTOR_PLUGIN,
 		WALReplicaPlugin:        util.DEFAULT_WAL_REPLICA_PLUGIN,
+		Postgres: PostgresProfile{
+			Extension: ExtensionSpec{
+				Name:                 DocumentDBExtensionName,
+				DynamicLibraryPath:   []string{"lib"},
+				ExtensionControlPath: []string{"share"},
+				LdLibraryPath:        []string{"lib", "system"},
+			},
+			AdditionalLibraries: []string{"pg_cron", "pg_documentdb_core", "pg_documentdb"},
+			BootstrapSQL: []string{
+				"CREATE EXTENSION documentdb CASCADE",
+				"CREATE ROLE documentdb WITH LOGIN PASSWORD 'Admin100'",
+				"ALTER ROLE documentdb WITH SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS",
+			},
+			PgHBA: []string{
+				"host all all localhost trust",
+				"hostssl replication streaming_replica all cert",
+			},
+			ProtectedParameters: map[string]string{
+				"cron.database_name": "postgres",
+			},
+			ReplicationAdminRole: "documentdb_admin_role",
+		},
 	}
 }
+
+// DocumentDBExtensionName is the PostgreSQL extension backing DocumentDB.
+const DocumentDBExtensionName = "documentdb"
 
 // DocumentDBAdapter is the first product adapter. It maps the DocumentDB custom
 // resource onto the product-neutral model consumed by the reconciler.
