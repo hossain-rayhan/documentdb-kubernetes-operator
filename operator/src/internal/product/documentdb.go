@@ -120,13 +120,23 @@ func (a DocumentDBAdapter) ToClusterIntent(db *dbpreview.DocumentDB) ClusterInte
 		postgresImage = util.PostgresImage()
 	}
 
-	var pg Postgres
+	pg := Postgres{
+		LogLevel:  db.Spec.LogLevel,
+		StopDelay: db.Spec.Timeouts.StopDelay,
+	}
 	if db.Spec.Postgres != nil {
-		pg = Postgres{
-			UID:         db.Spec.Postgres.UID,
-			GID:         db.Spec.Postgres.GID,
-			PostInitSQL: db.Spec.Postgres.PostInitSQL,
-		}
+		pg.UID = db.Spec.Postgres.UID
+		pg.GID = db.Spec.Postgres.GID
+		pg.PostInitSQL = db.Spec.Postgres.PostInitSQL
+		pg.Parameters = db.Spec.Postgres.Parameters
+	}
+
+	var tls TLS
+	if db.Status.TLS != nil && db.Status.TLS.Ready {
+		tls.GatewaySecret = db.Status.TLS.SecretName
+	}
+	if db.Spec.TLS != nil {
+		tls.Postgres = db.Spec.TLS.Postgres
 	}
 
 	var bootstrap Bootstrap
@@ -141,10 +151,12 @@ func (a DocumentDBAdapter) ToClusterIntent(db *dbpreview.DocumentDB) ClusterInte
 
 	return ClusterIntent{
 		Images: Images{
-			PostgresExtension: a.ExtensionImage(db),
-			Gateway:           a.GatewayImage(db),
-			Postgres:          postgresImage,
-			PullSecrets:       db.Spec.ImagePullSecrets,
+			PostgresExtension:           a.ExtensionImage(db),
+			PostgresExtensionPullPolicy: ParsePullPolicy(os.Getenv(util.DOCUMENTDB_IMAGE_PULL_POLICY_ENV)),
+			Gateway:                     a.GatewayImage(db),
+			GatewayPullPolicy:           os.Getenv(util.GATEWAY_IMAGE_PULL_POLICY_ENV),
+			Postgres:                    postgresImage,
+			PullSecrets:                 db.Spec.ImagePullSecrets,
 		},
 		Topology: Topology{
 			Instances: db.Spec.InstancesPerNode,
@@ -153,6 +165,9 @@ func (a DocumentDBAdapter) ToClusterIntent(db *dbpreview.DocumentDB) ClusterInte
 		Storage: Storage{
 			PvcSize: db.Spec.Resource.Storage.PvcSize,
 		},
+		Resources:  DocumentDBResources(db),
+		Monitoring: db.Spec.Monitoring,
+		TLS:        tls,
 		Identity: Identity{
 			Name:       db.Name,
 			UID:        db.UID,
@@ -161,7 +176,8 @@ func (a DocumentDBAdapter) ToClusterIntent(db *dbpreview.DocumentDB) ClusterInte
 		},
 		Postgres: pg,
 		FeatureGates: FeatureGates{
-			IOUring: dbpreview.IsFeatureGateEnabled(db, dbpreview.FeatureGateIOUring),
+			ChangeStreams: dbpreview.IsFeatureGateEnabled(db, dbpreview.FeatureGateChangeStreams),
+			IOUring:       dbpreview.IsFeatureGateEnabled(db, dbpreview.FeatureGateIOUring),
 		},
 		Bootstrap:             bootstrap,
 		CredentialSecret:      credentialSecret,
