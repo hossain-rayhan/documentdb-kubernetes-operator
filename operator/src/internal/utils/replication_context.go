@@ -45,16 +45,23 @@ const (
 	NotPresent
 )
 
-func GetReplicationContext(ctx context.Context, client client.Client, documentdb dbpreview.DocumentDB) (*ReplicationContext, error) {
-	singleClusterReplicationContext := ReplicationContext{
+// NewSingleRegionContext returns the replication context of a cluster that is
+// not part of a multi-region topology: it is primary, serves its endpoint, and
+// its CNPG cluster is named after the custom resource.
+func NewSingleRegionContext(name, environment, storageClass string) *ReplicationContext {
+	return &ReplicationContext{
 		state:                        NoReplication,
 		CrossCloudNetworkingStrategy: None,
-		Environment:                  documentdb.Spec.Environment,
-		StorageClass:                 documentdb.Spec.Resource.Storage.StorageClass,
-		CNPGClusterName:              documentdb.Name,
+		Environment:                  environment,
+		StorageClass:                 storageClass,
+		CNPGClusterName:              name,
 	}
+}
+
+func GetReplicationContext(ctx context.Context, client client.Client, documentdb dbpreview.DocumentDB) (*ReplicationContext, error) {
+	singleClusterReplicationContext := NewSingleRegionContext(documentdb.Name, documentdb.Spec.Environment, documentdb.Spec.Resource.Storage.StorageClass)
 	if documentdb.Spec.ClusterReplication == nil {
-		return &singleClusterReplicationContext, nil
+		return singleClusterReplicationContext, nil
 	}
 
 	self, others, replicationState, err := getTopology(ctx, client, documentdb)
@@ -77,7 +84,7 @@ func GetReplicationContext(ctx context.Context, client client.Client, documentdb
 
 	// If no remote clusters, then just proceed with a regular cluster
 	if len(others) == 0 {
-		return &singleClusterReplicationContext, nil
+		return singleClusterReplicationContext, nil
 	}
 
 	primaryCluster := generateCNPGClusterName(documentdb.Name, documentdb.Spec.ClusterReplication.Primary)
