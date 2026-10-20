@@ -30,51 +30,90 @@ import (
 
 // GetDocumentDBServiceDefinition returns the LoadBalancer Service definition for a given DocumentDB instance
 func GetDocumentDBServiceDefinition(documentdb *dbpreview.DocumentDB, replicationContext *ReplicationContext, namespace string, serviceType corev1.ServiceType) *corev1.Service {
-	// If no local HA, these two should be empty
-	selector := map[string]string{
-		"disabled": "true",
-	}
-	if replicationContext.EndpointEnabled() {
-		selector = map[string]string{
-			LABEL_APP:              documentdb.Name,
-			"cnpg.io/instanceRole": "primary", // Service forwards traffic to CNPG primary instance
-		}
-	}
-
 	// Ensure service name doesn't exceed 63 characters (Kubernetes limit)
 	serviceName := DOCUMENTDB_SERVICE_PREFIX + documentdb.Name
 	if len(serviceName) > 63 {
 		serviceName = serviceName[:63]
 	}
+	return BuildGatewayService(GatewayServiceOptions{
+		Name:            serviceName,
+		Namespace:       namespace,
+		ClusterName:     documentdb.Name,
+		OwnerAPIVersion: documentdb.APIVersion,
+		OwnerKind:       documentdb.Kind,
+		OwnerUID:        documentdb.UID,
+		Port:            GetPortFor(GATEWAY_PORT),
+		EndpointEnabled: replicationContext.EndpointEnabled(),
+		Environment:     replicationContext.Environment,
+		ServiceType:     serviceType,
+	})
+}
+
+// GatewayServiceOptions are the product-neutral inputs of the gateway Service.
+type GatewayServiceOptions struct {
+	// Name and Namespace of the Service.
+	Name      string
+	Namespace string
+	// ClusterName is the owning custom resource name; it is the owner
+	// reference name and the pod selector's app label value.
+	ClusterName string
+	// OwnerAPIVersion, OwnerKind, and OwnerUID identify the owning custom
+	// resource for the controller owner reference.
+	OwnerAPIVersion string
+	OwnerKind       string
+	OwnerUID        types.UID
+	// Port is the gateway port exposed by the Service and targeted on the pod.
+	Port int32
+	// EndpointEnabled selects the CNPG primary; when false the Service selects
+	// nothing (for example a multi-region replica cluster).
+	EndpointEnabled bool
+	// Environment selects cloud-specific LoadBalancer annotations.
+	Environment string
+	ServiceType corev1.ServiceType
+}
+
+// BuildGatewayService returns the gateway Service that forwards client traffic
+// to the CNPG primary instance.
+func BuildGatewayService(o GatewayServiceOptions) *corev1.Service {
+	// If no local HA, these two should be empty
+	selector := map[string]string{
+		"disabled": "true",
+	}
+	if o.EndpointEnabled {
+		selector = map[string]string{
+			LABEL_APP:              o.ClusterName,
+			"cnpg.io/instanceRole": "primary", // Service forwards traffic to CNPG primary instance
+		}
+	}
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceName,
-			Namespace: namespace,
-			// CRITICAL: Set owner reference so service gets deleted when DocumentDB instance is deleted
+			Name:      o.Name,
+			Namespace: o.Namespace,
+			// CRITICAL: Set owner reference so service gets deleted when the owning instance is deleted
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion:         documentdb.APIVersion,
-					Kind:               documentdb.Kind,
-					Name:               documentdb.Name,
-					UID:                documentdb.UID,
-					Controller:         &[]bool{true}[0], // This service is controlled by the DocumentDB instance
-					BlockOwnerDeletion: &[]bool{true}[0], // Block DocumentDB deletion until service is deleted
+					APIVersion:         o.OwnerAPIVersion,
+					Kind:               o.OwnerKind,
+					Name:               o.ClusterName,
+					UID:                o.OwnerUID,
+					Controller:         &[]bool{true}[0], // This service is controlled by the owning instance
+					BlockOwnerDeletion: &[]bool{true}[0], // Block owner deletion until service is deleted
 				},
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: selector,
 			Ports: []corev1.ServicePort{
-				{Name: "gateway", Protocol: corev1.ProtocolTCP, Port: GetPortFor(GATEWAY_PORT), TargetPort: intstr.FromInt(int(GetPortFor(GATEWAY_PORT)))},
+				{Name: "gateway", Protocol: corev1.ProtocolTCP, Port: o.Port, TargetPort: intstr.FromInt(int(o.Port))},
 			},
-			Type: serviceType,
+			Type: o.ServiceType,
 		},
 	}
 
 	// Add environment-specific annotations for LoadBalancer services
-	if serviceType == corev1.ServiceTypeLoadBalancer {
-		service.ObjectMeta.Annotations = getEnvironmentSpecificAnnotations(replicationContext.Environment)
+	if o.ServiceType == corev1.ServiceTypeLoadBalancer {
+		service.ObjectMeta.Annotations = getEnvironmentSpecificAnnotations(o.Environment)
 	}
 
 	return service

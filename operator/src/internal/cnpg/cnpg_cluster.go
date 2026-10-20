@@ -124,7 +124,7 @@ func GetCnpgClusterSpecFromIntent(req ctrl.Request, intent product.ClusterIntent
 						// Compute config hash for change detection. The operator triggers a
 						// rolling restart (via restart annotation) when plugin parameters
 						// change, ensuring pods pick up new config.
-						if configData, err := otelcfg.GenerateConfigMapData(intent.Identity.Name, req.Namespace, intent.Monitoring); err == nil {
+						if configData, err := otelcfg.GenerateConfigMapDataWithOptions(OTelOptions(intent.Product), intent.Identity.Name, req.Namespace, intent.Monitoring); err == nil {
 							params[util.PLUGIN_PARAM_OTEL_CONFIG_HASH] = otelcfg.HashConfigMapData(configData)
 						} else {
 							log.Error(err, "Failed to generate OTel config hash; config changes may not trigger rolling restart")
@@ -435,4 +435,12 @@ func addGatewayContractParams(params map[string]string, gw product.GatewayProfil
 	}
 	addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_USERNAME_ENV, gw.UsernameEnv)
 	addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_PASSWORD_ENV, gw.PasswordEnv)
+}
+
+// OTelOptions maps the product naming onto the OTel collector config options.
+func OTelOptions(p product.ProductProfile) otelcfg.Options {
+	return otelcfg.Options{
+		ClusterAttribute: p.Naming.MetricClusterAttribute,
+		Generator:        p.Naming.OperatorName,
+	}
 }

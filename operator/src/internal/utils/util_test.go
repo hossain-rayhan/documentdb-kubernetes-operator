@@ -1002,3 +1002,18 @@ func TestSemverToExtensionVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildGatewayService_ProductNeutral(t *testing.T) {
+	svc := BuildGatewayService(GatewayServiceOptions{
+		Name: "cosmos-svc-x", Namespace: "ns", ClusterName: "x",
+		OwnerAPIVersion: "cosmos.example/v1", OwnerKind: "CosmosCluster", OwnerUID: "uid",
+		Port: 8081, EndpointEnabled: true, Environment: "aks", ServiceType: corev1.ServiceTypeLoadBalancer,
+	})
+	if svc.Name != "cosmos-svc-x" || svc.Spec.Ports[0].Port != 8081 || svc.Spec.Ports[0].TargetPort.IntValue() != 8081 {
+		t.Fatalf("unexpected service: %+v", svc.Spec)
+	}
+	if svc.OwnerReferences[0].Kind != "CosmosCluster" || svc.Spec.Selector[LABEL_APP] != "x" ||
+		svc.Annotations["service.beta.kubernetes.io/azure-load-balancer-external"] != "true" {
+		t.Fatalf("unexpected owner/selector/annotations: %+v", svc.ObjectMeta)
+	}
+}

@@ -22,6 +22,8 @@ type NamingProfile struct {
 	// MetricClusterAttribute is the OTel resource attribute key carrying the
 	// cluster name.
 	MetricClusterAttribute string
+	// OperatorName identifies the operator in generated artifacts.
+	OperatorName string
 }
 
 // ClusterLabel is the PV/PVC label holding the owning custom resource name.
