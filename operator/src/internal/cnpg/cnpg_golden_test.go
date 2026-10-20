@@ -12,7 +12,7 @@ import (
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -87,8 +87,8 @@ func goldenCases() []goldenCase {
 				d.Spec.DocumentDbCredentialSecret = "creds"
 				d.Spec.Plugins = &dbpreview.PluginsSpec{SidecarInjectorName: "custom.injector.io"}
 				d.Spec.Postgres = &dbpreview.PostgresSpec{
-					UID:         pointer.Int64(26),
-					GID:         pointer.Int64(26),
+					UID:         ptr.To[int64](26),
+					GID:         ptr.To[int64](26),
 					PostInitSQL: []string{"SELECT 1"},
 					Parameters:  map[string]string{"work_mem": "64MB", "max_wal_senders": "99"},
 				}
@@ -110,7 +110,7 @@ func goldenCases() []goldenCase {
 					},
 				}
 				d.Spec.Affinity = cnpgv1.AffinityConfiguration{
-					EnablePodAntiAffinity: pointer.Bool(true),
+					EnablePodAntiAffinity: ptr.To(true),
 					TopologyKey:           "kubernetes.io/hostname",
 				}
 			},
