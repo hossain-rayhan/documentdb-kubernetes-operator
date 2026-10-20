@@ -22,6 +22,7 @@ func TestDocumentDBNamingMatchesWireContract(t *testing.T) {
 		n.SchemaVersionAnnotation(): util.AnnotationSchemaVersion,
 		n.Finalizer():               "documentdb.io/pv-retention-finalizer",
 		n.ServicePrefix:             util.DOCUMENTDB_SERVICE_PREFIX,
+		n.Kind:                      "DocumentDB",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)

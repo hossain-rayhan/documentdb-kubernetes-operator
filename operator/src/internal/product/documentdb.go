@@ -49,6 +49,7 @@ func DocumentDBProfile() ProductProfile {
 			ServicePrefix:          util.DOCUMENTDB_SERVICE_PREFIX,
 			MetricClusterAttribute: "documentdb.cluster",
 			OperatorName:           "documentdb-operator",
+			Kind:                   "DocumentDB",
 		},
 	}
 }

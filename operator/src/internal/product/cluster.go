@@ -24,6 +24,9 @@ type NamingProfile struct {
 	MetricClusterAttribute string
 	// OperatorName identifies the operator in generated artifacts.
 	OperatorName string
+	// Kind is the custom resource kind; it identifies the product owner
+	// reference on CNPG clusters.
+	Kind string
 }
 
 // ClusterLabel is the PV/PVC label holding the owning custom resource name.
