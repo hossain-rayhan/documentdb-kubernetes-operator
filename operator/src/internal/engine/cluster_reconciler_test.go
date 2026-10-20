@@ -185,7 +185,7 @@ func TestClusterReconcileFinalizerLifecycle(t *testing.T) {
 		c := newFakeClient(t, s, nil, testCluster())
 		r, _ := newClusterReconciler(c, s, &sqlRecorder{})
 		res, err := r.Reconcile(context.Background(), clusterKey)
-		if err != nil || !res.Requeue {
+		if err != nil || res.IsZero() || res.RequeueAfter != 0 {
 			t.Fatalf("expected requeue after adding finalizer, got %v, %v", res, err)
 		}
 		if got := getDocumentDB(t, c); !slices.Contains(got.Finalizers, finalizer) {
