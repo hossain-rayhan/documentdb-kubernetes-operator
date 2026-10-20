@@ -10,14 +10,22 @@ follow the same pattern with a different extension and gateway.
 This design separates the CNPG orchestration (rendering the `Cluster`,
 syncing it, PostgreSQL parameters, the resource split, and the extension
 lifecycle) from the DocumentDB product, so a second operator can reuse the same
-code. DocumentDB behavior is unchanged: golden snapshots of the rendered
-`Cluster` are byte-identical before and after the refactor.
+code. The reconcilers (cluster, certificate, persistent volume, backup,
+scheduled backup) and the admission rules are generic too. DocumentDB behavior
+is unchanged: golden snapshots of the rendered `Cluster` are byte-identical
+before and after the refactor, and the controller and webhook tests pass
+unmodified.
 
 ## Layers
 
 ```
  product CR (DocumentDB, ...)
-        │  Adapter.ToClusterIntent
+        │  ClusterAdapter[T]: Intent · Spec · Status/SetStatus · Naming
+        ▼
+ generic reconcilers + admission rules   internal/engine, internal/validation
+ (cluster, certificate, PV, backup,      (public: pkg/core)
+  scheduled backup)
+        │
         ▼
  ClusterIntent + ProductProfile          internal/product   (public: pkg/core)
         │
@@ -47,6 +55,26 @@ code. DocumentDB behavior is unchanged: golden snapshots of the rendered
   custom resource to a `ClusterIntent`. It is the only place that reads the
   DocumentDB spec for rendering.
 
+- **`ClusterAdapter[T]`** (`internal/product/cluster.go`) extends the adapter
+  for the reconcilers: `New`, `Intent`, a neutral operational `ClusterSpec`
+  (TLS, exposure, PV reclaim, environment, replication flags), a neutral
+  `ClusterStatus` read/write, and `ConnectionString`. `NamingProfile` on the
+  profile holds the finalizer, CR kind, Service prefix, labels, and the OTel
+  metric attribute.
+- **`internal/engine`** holds `ClusterReconciler[T]`,
+  `CertificateReconciler[T]`, `PersistentVolumeReconciler[T]`,
+  `BackupReconciler[T,B]`, and `ScheduledBackupReconciler[T,S,B]`.
+  Multi-region replication plugs in through `ReplicationHooks[T]`; when it is
+  nil the cluster runs single-region.
+- **`internal/validation`** holds the admission rules (schema version vs.
+  binary, image rollback, storage resize, restore compatibility, ImageVolume
+  probe). They take `Terms` so error messages use the product's field names.
+
+The DocumentDB controllers and webhook in `internal/controller` and
+`internal/webhook` are now thin wrappers over these packages. They keep their
+types, method names, and RBAC markers, so `cmd/main.go`, tests, and generated
+manifests are unchanged.
+
 The renderer (`cnpg.GetCnpgClusterSpecFromIntent`) only reads the intent. The
 old `GetCnpgClusterSpec`, `MergeParameters`, `ProtectedParameters`,
 `ComputeResourceSplit`, and `ValidateResources` entry points remain as thin
@@ -65,6 +93,10 @@ DocumentDB wrappers.
 | Image sync | `SyncCnpgCluster` reads the extension by name | first `Extensions` entry |
 | Resource validation path | `ValidateResourcesFor(..., base)` | `spec.resource` |
 | Gateway sidecar | `GatewayProfile` → plugin params | injector defaults |
+| Client Service port | `GatewayProfile.Port`, else `GATEWAY_PORT` | `10260` |
+| Service name prefix, finalizer, labels | `NamingProfile` | `documentdb-service-`, `documentdb.io/...` |
+| OTel metric attribute | `NamingProfile` | `documentdb.cluster` |
+| Admission error wording | `validation.Terms` | `documentDBVersion`, `spec.documentDBImage`, ... |
 
 ## Sidecar-injector gateway contract
 
@@ -97,19 +129,42 @@ Go does not allow importing `internal/` packages from another module, so
 profile types plus `RenderCluster`, `SyncCluster`, `MergeParameters`,
 `ProtectedParameters`, `ComputeResourceSplit`, `ValidateResources`,
 `DefaultSplitConfig`, the extension SQL helpers, and `DocumentDBProfile` as a
-reference profile. It adds no behavior of its own.
+reference profile. `pkg/core/engine.go` re-exports the reconcilers, adapters,
+`ReplicationHooks`, `NewPodSQLExecutor`, predicates, and the validation
+helpers (`ValidateSchemaVersion`, `ValidateImageRollback`,
+`ValidateStorageResize`, `ValidateRestoreCompatibility`,
+`NewImageVolumeProbe`). It adds no behavior of its own.
 
 A second product:
 
-1. Defines its own CRD and an adapter that returns a `core.ProductProfile` and
-   builds a `core.ClusterIntent` from its custom resource.
-2. Writes its own reconciler. It calls `core.RenderCluster` to build the
-   desired `Cluster` and `core.SyncCluster` to apply changes, and runs
-   `core.ExtensionUpdateSQL` / `core.ReplicationRoleGrantSQL` for the
-   extension lifecycle.
+1. Defines its own CRD and a `core.ClusterAdapter[*MyCR]` that returns its
+   `core.ProductProfile` (including `Naming`) and maps the CR to
+   `core.ClusterIntent`, `core.ClusterSpec`, and `core.ClusterStatus`. Backup
+   support adds a `core.BackupAdapter[*MyBackup]` and
+   `core.ScheduledBackupAdapter[*MySchedule]`.
+2. Wires the generic reconcilers in its `main.go`:
+
+   ```go
+   adapter := cosmos.AccountAdapter{}
+   (&core.ClusterReconciler[*v1.Account]{
+       Client: mgr.GetClient(), Scheme: mgr.GetScheme(),
+       Recorder: mgr.GetEventRecorderFor("account-controller"),
+       SQLExecutor: core.NewPodSQLExecutor(mgr.GetClient(), clientset, mgr.GetConfig()),
+       Adapter: adapter, // Replication: nil -> single-region
+   }).SetupWithManager(mgr, "account")
+   (&core.CertificateReconciler[*v1.Account]{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Adapter: adapter}).SetupWithManager(mgr, "account-certificate")
+   (&core.PersistentVolumeReconciler[*v1.Account]{Client: mgr.GetClient(), Adapter: adapter}).SetupWithManager(mgr, "account-pv")
+   ```
+
+   It writes its own webhook on top of the `core.Validate*` helpers with its
+   own `core.ValidationTerms`, and its own RBAC markers for its API group.
 3. Ships the shared sidecar-injector with its gateway image, setting
    `ProductProfile.Gateway` when its gateway contract differs.
 
+`pkg/core/engine_test.go` defines a fake `Account` CR in another API group and
+drives `core.ClusterReconciler` with a fake client through finalizer, RBAC,
+CNPG `Cluster` creation with the second product's extension, and status,
+using only `pkg/core`.
 `pkg/core/example_test.go` renders a non-DocumentDB cluster through the facade.
 `internal/cnpg/second_product_test.go` renders a synthetic `pgcosmos` product
 end to end and fails if any DocumentDB string other than the documented
@@ -127,12 +182,11 @@ end to end and fails if any DocumentDB string other than the documented
 
 ## Not in scope / follow-ups
 
-- `DocumentDBReconciler`, the webhook, backup CRDs, and the kubectl plugin stay
-  DocumentDB-specific. A second product writes its own reconciler on top of
-  `pkg/core`.
-- The client `Service` port comes from the `GATEWAY_PORT` environment variable
-  (default `10260`), not from `GatewayProfile.Port`.
-- The OTel collector ConfigMap labels metrics with `documentdb.cluster`.
-  Making the attribute name a profile field is a follow-up.
+- CRD types, `cmd/main.go` wiring, Helm charts, RBAC markers, and the kubectl
+  plugin stay per product.
+- DocumentDB multi-region replication (fleet networking, promotion, and
+  publication/subscription) stays DocumentDB-specific behind
+  `ReplicationHooks`. Another product can implement its own hooks or run
+  single-region.
 - `MonitoringSpec` and `CertificatesConfiguration` are reused from the
   DocumentDB API and CNPG respectively as shared types.
