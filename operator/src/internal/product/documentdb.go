@@ -44,6 +44,11 @@ func DocumentDBProfile() ProductProfile {
 			},
 			ReplicationAdminRole: "documentdb_admin_role",
 		},
+		Naming: NamingProfile{
+			Domain:                 "documentdb.io",
+			ServicePrefix:          util.DOCUMENTDB_SERVICE_PREFIX,
+			MetricClusterAttribute: "documentdb.cluster",
+		},
 	}
 }
 
@@ -214,3 +219,65 @@ func (a DocumentDBAdapter) ToClusterIntent(db *dbpreview.DocumentDB) ClusterInte
 
 // compile-time assertion that DocumentDBAdapter satisfies the Adapter seam.
 var _ Adapter = DocumentDBAdapter{}
+
+// DocumentDBAdapter implements the full shared-reconciler contract.
+var _ ClusterAdapter[*dbpreview.DocumentDB] = DocumentDBAdapter{}
+
+// New returns an empty DocumentDB custom resource.
+func (DocumentDBAdapter) New() *dbpreview.DocumentDB { return &dbpreview.DocumentDB{} }
+
+// Intent is ToClusterIntent under the ClusterAdapter contract.
+func (a DocumentDBAdapter) Intent(db *dbpreview.DocumentDB) ClusterIntent {
+	return a.ToClusterIntent(db)
+}
+
+// Spec returns the operational view of a DocumentDB custom resource.
+func (DocumentDBAdapter) Spec(db *dbpreview.DocumentDB) ClusterSpec {
+	spec := ClusterSpec{
+		ServiceType:                   db.Spec.ExposeViaService.ServiceType,
+		Environment:                   db.Spec.Environment,
+		StorageClass:                  db.Spec.Resource.Storage.StorageClass,
+		PersistentVolumeReclaimPolicy: db.Spec.Resource.Storage.PersistentVolumeReclaimPolicy,
+		RecoveryPersistentVolume:      db.GetPVNameForRecovery(),
+		SchemaVersion:                 db.Spec.SchemaVersion,
+		Monitoring:                    db.Spec.Monitoring,
+		Backup:                        db.Spec.Backup,
+	}
+	if db.Spec.TLS != nil {
+		spec.GatewayTLS = db.Spec.TLS.Gateway
+	}
+	return spec
+}
+
+// Status reads the neutral status fields from a DocumentDB custom resource.
+func (DocumentDBAdapter) Status(db *dbpreview.DocumentDB) ClusterStatus {
+	return ClusterStatus{
+		Phase:            db.Status.Status,
+		ConnectionString: db.Status.ConnectionString,
+		SchemaVersion:    db.Status.SchemaVersion,
+		ExtensionImage:   db.Status.DocumentDBImage,
+		GatewayImage:     db.Status.GatewayImage,
+		TLS:              db.Status.TLS,
+	}
+}
+
+// SetStatus writes the neutral status fields into a DocumentDB custom resource;
+// multi-region fields (TargetPrimary, LocalPrimary) are left untouched.
+func (DocumentDBAdapter) SetStatus(db *dbpreview.DocumentDB, s ClusterStatus) {
+	db.Status.Status = s.Phase
+	db.Status.ConnectionString = s.ConnectionString
+	db.Status.SchemaVersion = s.SchemaVersion
+	db.Status.DocumentDBImage = s.ExtensionImage
+	db.Status.GatewayImage = s.GatewayImage
+	db.Status.TLS = s.TLS
+}
+
+// ConnectionString builds the MongoDB-protocol connection string for a
+// DocumentDB gateway.
+func (a DocumentDBAdapter) ConnectionString(db *dbpreview.DocumentDB, host string, port int32, trustTLS bool) string {
+	secretName := db.Spec.DocumentDbCredentialSecret
+	if secretName == "" {
+		secretName = a.Profile().DefaultCredentialSecret
+	}
+	return util.MongoConnectionString(secretName, db.Namespace, host, port, trustTLS)
+}

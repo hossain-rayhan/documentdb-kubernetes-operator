@@ -43,6 +43,10 @@ type ProductProfile struct {
 	// Gateway is the product's gateway sidecar contract. Zero values keep the
 	// sidecar injector's DocumentDB gateway defaults.
 	Gateway GatewayProfile
+
+	// Naming is the product's label/annotation/finalizer domain and resource
+	// naming conventions used by the shared reconcilers.
+	Naming NamingProfile
 }
 
 // GatewayProfile describes how the sidecar injector runs the product gateway.

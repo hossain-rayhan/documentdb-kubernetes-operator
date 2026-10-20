@@ -414,7 +414,14 @@ func GenerateConnectionString(documentdb *dbpreview.DocumentDB, serviceIp string
 	if secretName == "" {
 		secretName = DEFAULT_DOCUMENTDB_CREDENTIALS_SECRET
 	}
-	conn := fmt.Sprintf("mongodb://$(kubectl get secret %s -n %s -o jsonpath='{.data.username}' | base64 -d):$(kubectl get secret %s -n %s -o jsonpath='{.data.password}' | base64 -d)@%s:%d/?directConnection=true&authMechanism=SCRAM-SHA-256&tls=true", secretName, documentdb.Namespace, secretName, documentdb.Namespace, serviceIp, GetPortFor(GATEWAY_PORT))
+	return MongoConnectionString(secretName, documentdb.Namespace, serviceIp, GetPortFor(GATEWAY_PORT), trustTLS)
+}
+
+// MongoConnectionString builds the DocumentDB (MongoDB wire protocol) client
+// connection string for a gateway at host:port, reading credentials from
+// secretName in namespace.
+func MongoConnectionString(secretName, namespace, host string, port int32, trustTLS bool) string {
+	conn := fmt.Sprintf("mongodb://$(kubectl get secret %s -n %s -o jsonpath='{.data.username}' | base64 -d):$(kubectl get secret %s -n %s -o jsonpath='{.data.password}' | base64 -d)@%s:%d/?directConnection=true&authMechanism=SCRAM-SHA-256&tls=true", secretName, namespace, secretName, namespace, host, port)
 	if !trustTLS {
 		conn += "&tlsAllowInvalidCertificates=true"
 	}
