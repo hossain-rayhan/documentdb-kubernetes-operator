@@ -184,6 +184,10 @@ func EnsureServiceIP(ctx context.Context, service *corev1.Service) (string, erro
 }
 
 // UpsertService checks if the Service already exists, and creates it if not.
+// An existing Service controlled by the desired Service's controller owner
+// has its ports converged to the desired ports (for example after a gateway
+// port change); server-assigned fields such as ClusterIP(s) and NodePorts and
+// all other spec and metadata fields are preserved.
 func UpsertService(ctx context.Context, c client.Client, service *corev1.Service) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
 	foundService := &corev1.Service{}
@@ -203,11 +207,44 @@ func UpsertService(ctx context.Context, c client.Client, service *corev1.Service
 			return nil, err
 		}
 	} else {
+		if sameController(foundService, service) {
+			foundService.Spec.Ports = convergeServicePorts(foundService.Spec.Ports, service.Spec.Ports)
+		}
 		if err := c.Update(ctx, foundService); err != nil {
 			return nil, err
 		}
 	}
 	return foundService, nil
+}
+
+// sameController reports whether found is controlled by desired's controller
+// owner, so UpsertService never rewrites a Service it does not own.
+func sameController(found, desired *corev1.Service) bool {
+	owner := metav1.GetControllerOf(desired)
+	if owner == nil {
+		return false
+	}
+	current := metav1.GetControllerOf(found)
+	return current != nil && current.UID == owner.UID
+}
+
+// convergeServicePorts returns the desired ports, keeping the NodePort the API
+// server allocated to a same-named current port when the desired port leaves
+// it unset.
+func convergeServicePorts(current, desired []corev1.ServicePort) []corev1.ServicePort {
+	ports := make([]corev1.ServicePort, len(desired))
+	for i, port := range desired {
+		if port.NodePort == 0 {
+			for _, cur := range current {
+				if cur.Name == port.Name && cur.Protocol == port.Protocol {
+					port.NodePort = cur.NodePort
+					break
+				}
+			}
+		}
+		ports[i] = port
+	}
+	return ports
 }
 
 func GetPortFor(name string) int32 {

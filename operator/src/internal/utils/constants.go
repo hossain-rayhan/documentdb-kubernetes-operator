@@ -130,6 +130,13 @@ const (
 	PLUGIN_PARAM_GATEWAY_ARGS           = "gatewayArgs"
 	PLUGIN_PARAM_GATEWAY_USERNAME_ENV   = "gatewayUsernameEnv"
 	PLUGIN_PARAM_GATEWAY_PASSWORD_ENV   = "gatewayPasswordEnv"
+	// The sidecar injector's gateway contract defaults; keep in sync with
+	// cnpg-plugins/sidecar-injector/internal/config. Its defaulting webhook
+	// drops parameters equal to these, so the operator omits them too.
+	PLUGIN_DEFAULT_GATEWAY_CONTAINER_NAME = "documentdb-gateway"
+	PLUGIN_DEFAULT_GATEWAY_PORT           = int32(10260)
+	PLUGIN_DEFAULT_GATEWAY_USERNAME_ENV   = "USERNAME"
+	PLUGIN_DEFAULT_GATEWAY_PASSWORD_ENV   = "PASSWORD"
 
 	// TODO: remove these constants once change stream support is included in the official images.
 	CHANGESTREAM_DOCUMENTDB_IMAGE_REPOSITORY = "ghcr.io/wentingwu666666/documentdb-kubernetes-operator"

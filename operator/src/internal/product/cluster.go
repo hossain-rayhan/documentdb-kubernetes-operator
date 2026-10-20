@@ -22,6 +22,9 @@ type NamingProfile struct {
 	// MetricClusterAttribute is the OTel resource attribute key carrying the
 	// cluster name.
 	MetricClusterAttribute string
+	// HealthMetricName is the OTel gauge the monitoring sidecar reports
+	// PostgreSQL liveness as; empty means "documentdb.postgres.up".
+	HealthMetricName string
 	// OperatorName identifies the operator in generated artifacts.
 	OperatorName string
 	// Kind is the custom resource kind; it identifies the product owner

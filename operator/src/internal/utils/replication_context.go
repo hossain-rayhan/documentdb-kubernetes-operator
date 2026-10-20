@@ -25,7 +25,7 @@ type ReplicationContext struct {
 	OtherFleetMemberNames        []string
 	currentLocalPrimary          string
 	targetLocalPrimary           string
-	state                        replicationState
+	state                        ReplicationState
 }
 
 type crossCloudNetworkingStrategy string
@@ -36,26 +36,43 @@ const (
 	Istio      crossCloudNetworkingStrategy = "Istio"
 )
 
-type replicationState int32
+// ReplicationState is the role of a cluster in its replication topology.
+type ReplicationState int32
 
 const (
-	NoReplication replicationState = iota
+	// NoReplication is a single-region cluster: primary, endpoint always enabled.
+	NoReplication ReplicationState = iota
+	// Primary is the primary cluster of a replication topology.
 	Primary
+	// Replica is a cluster replicating from PrimaryCNPGClusterName.
 	Replica
+	// NotPresent is a cluster that is not a member of its topology; the
+	// reconciler deletes its resources.
 	NotPresent
 )
+
+// NewReplicationContext returns a replication context in state. The endpoint
+// of a replicating cluster is enabled only once currentLocalPrimary equals
+// targetLocalPrimary (that is, a pending promotion has completed); it is always
+// enabled for NoReplication. The caller sets the exported topology fields.
+func NewReplicationContext(state ReplicationState, currentLocalPrimary, targetLocalPrimary string) *ReplicationContext {
+	return &ReplicationContext{
+		state:                        state,
+		CrossCloudNetworkingStrategy: None,
+		currentLocalPrimary:          currentLocalPrimary,
+		targetLocalPrimary:           targetLocalPrimary,
+	}
+}
 
 // NewSingleRegionContext returns the replication context of a cluster that is
 // not part of a multi-region topology: it is primary, serves its endpoint, and
 // its CNPG cluster is named after the custom resource.
 func NewSingleRegionContext(name, environment, storageClass string) *ReplicationContext {
-	return &ReplicationContext{
-		state:                        NoReplication,
-		CrossCloudNetworkingStrategy: None,
-		Environment:                  environment,
-		StorageClass:                 storageClass,
-		CNPGClusterName:              name,
-	}
+	rc := NewReplicationContext(NoReplication, "", "")
+	rc.Environment = environment
+	rc.StorageClass = storageClass
+	rc.CNPGClusterName = name
+	return rc
 }
 
 func GetReplicationContext(ctx context.Context, client client.Client, documentdb dbpreview.DocumentDB) (*ReplicationContext, error) {
@@ -73,13 +90,7 @@ func GetReplicationContext(ctx context.Context, client client.Client, documentdb
 	// This edge case can happen when the Hub cluster is also a member, and we are not
 	// putting the documentdb instance on it
 	if self == nil {
-		return &ReplicationContext{
-			state:                        NotPresent,
-			CrossCloudNetworkingStrategy: None,
-			Environment:                  "",
-			StorageClass:                 "",
-			CNPGClusterName:              "",
-		}, nil
+		return NewReplicationContext(NotPresent, "", ""), nil
 	}
 
 	// If no remote clusters, then just proceed with a regular cluster
@@ -103,19 +114,16 @@ func GetReplicationContext(ctx context.Context, client client.Client, documentdb
 		environment = self.EnvironmentOverride
 	}
 
-	return &ReplicationContext{
-		CNPGClusterName:              generateCNPGClusterName(documentdb.Name, self.Name),
-		OtherCNPGClusterNames:        otherCNPGClusterNames,
-		CrossCloudNetworkingStrategy: crossCloudNetworkingStrategy(documentdb.Spec.ClusterReplication.CrossCloudNetworkingStrategy),
-		PrimaryCNPGClusterName:       primaryCluster,
-		Environment:                  environment,
-		StorageClass:                 storageClass,
-		state:                        replicationState,
-		FleetMemberName:              self.Name,
-		OtherFleetMemberNames:        others,
-		targetLocalPrimary:           documentdb.Status.TargetPrimary,
-		currentLocalPrimary:          documentdb.Status.LocalPrimary,
-	}, nil
+	rc := NewReplicationContext(replicationState, documentdb.Status.LocalPrimary, documentdb.Status.TargetPrimary)
+	rc.CNPGClusterName = generateCNPGClusterName(documentdb.Name, self.Name)
+	rc.OtherCNPGClusterNames = otherCNPGClusterNames
+	rc.CrossCloudNetworkingStrategy = crossCloudNetworkingStrategy(documentdb.Spec.ClusterReplication.CrossCloudNetworkingStrategy)
+	rc.PrimaryCNPGClusterName = primaryCluster
+	rc.Environment = environment
+	rc.StorageClass = storageClass
+	rc.FleetMemberName = self.Name
+	rc.OtherFleetMemberNames = others
+	return rc, nil
 }
 
 // String implements fmt.Stringer interface for better logging output
@@ -229,7 +237,7 @@ func (r *ReplicationContext) CreateStandbyNamesList() []string {
 	return standbyNames
 }
 
-func getTopology(ctx context.Context, client client.Client, documentdb dbpreview.DocumentDB) (*dbpreview.MemberCluster, []string, replicationState, error) {
+func getTopology(ctx context.Context, client client.Client, documentdb dbpreview.DocumentDB) (*dbpreview.MemberCluster, []string, ReplicationState, error) {
 	memberClusterName := documentdb.Name
 	var err error
 

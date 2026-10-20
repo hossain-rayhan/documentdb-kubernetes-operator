@@ -42,3 +42,18 @@ func Example() {
 	// operator
 	// ALTER EXTENSION pgcosmos UPDATE
 }
+
+// ExampleNewReplicationContext builds the contexts a product's
+// ReplicationHooks returns for a primary awaiting promotion and a replica.
+func ExampleNewReplicationContext() {
+	promoting := core.NewReplicationContext(core.ReplicationPrimary, "account-east", "account-west")
+	fmt.Println(promoting.IsPrimary(), promoting.EndpointEnabled())
+
+	replica := core.NewReplicationContext(core.ReplicationReplica, "", "")
+	replica.PrimaryCNPGClusterName = "account-east"
+	replica.OtherCNPGClusterNames = []string{"account-east"}
+	fmt.Println(replica.IsPrimary(), replica.IsReplicating(), replica.GetReplicationSource())
+	// Output:
+	// true false
+	// false true account-east
+}

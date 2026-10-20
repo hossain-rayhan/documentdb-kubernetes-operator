@@ -65,7 +65,13 @@ unmodified.
   `CertificateReconciler[T]`, `PersistentVolumeReconciler[T]`,
   `BackupReconciler[T,B]`, and `ScheduledBackupReconciler[T,S,B]`.
   Multi-region replication plugs in through `ReplicationHooks[T]`; when it is
-  nil the cluster runs single-region.
+  nil the cluster runs single-region. Its `Context` method returns a
+  `ReplicationContext` built with `NewReplicationContext(state,
+  currentLocalPrimary, targetLocalPrimary)`. The state is `NoReplication`,
+  `Primary`, `Replica`, or `NotPresent`; the cluster, Service, and backup
+  reconcilers read it to set the replica source, skip the cluster or backups,
+  and hold the client endpoint until a pending promotion finishes (current and
+  target local primaries differ).
 - **`internal/validation`** holds the admission rules (schema version vs.
   binary, image rollback, storage resize, restore compatibility, ImageVolume
   probe). They take `Terms` so error messages use the product's field names.
@@ -96,6 +102,7 @@ DocumentDB wrappers.
 | Client Service port | `GatewayProfile.Port`, else `GATEWAY_PORT` | `10260` |
 | Service name prefix, finalizer, labels | `NamingProfile` | `documentdb-service-`, `documentdb.io/...` |
 | OTel metric attribute | `NamingProfile` | `documentdb.cluster` |
+| OTel SQL health metric | `NamingProfile.HealthMetricName` | `documentdb.postgres.up` |
 | Admission error wording | `validation.Terms` | `documentDBVersion`, `spec.documentDBImage`, ... |
 
 ## Sidecar-injector gateway contract
@@ -105,9 +112,13 @@ The injector accepts five optional plugin parameters: `gatewayContainerName`,
 verbatim), `gatewayUsernameEnv`, and `gatewayPasswordEnv`. They default to the
 DocumentDB gateway (`documentdb-gateway`, `10260`, `--create-user ...
 --start-pg false --pg-port 5432`, `USERNAME`, `PASSWORD`). The operator sends
-them only when `ProductProfile.Gateway` sets them, and the injector serializes
-them only when they differ from the defaults, so existing clusters see no
-parameter change and no rolling restart. See
+them only when `ProductProfile.Gateway` sets them to a non-default value (an
+empty `Args` slice is sent as `[]`), matching how the injector serializes
+them, so existing clusters see no parameter change and no rolling restart.
+`SyncCnpgCluster` adds, updates, and removes these parameters on existing
+clusters and requests a rolling restart when they change. When the gateway
+port changes, the client Service's ports follow it; the Service keeps its
+assigned cluster IPs and node ports. See
 [the plugin configuration guide](../developer-guides/sidecar-injector-plugin-configuration.md).
 
 ## Wire contracts kept on purpose
@@ -130,7 +141,9 @@ profile types plus `RenderCluster`, `SyncCluster`, `MergeParameters`,
 `ProtectedParameters`, `ComputeResourceSplit`, `ValidateResources`,
 `DefaultSplitConfig`, the extension SQL helpers, and `DocumentDBProfile` as a
 reference profile. `pkg/core/engine.go` re-exports the reconcilers, adapters,
-`ReplicationHooks`, `NewPodSQLExecutor`, predicates, and the validation
+`ReplicationHooks`, `NewReplicationContext` with its `ReplicationState`
+values (`NoReplication`, `ReplicationPrimary`, `ReplicationReplica`,
+`ReplicationNotPresent`), `NewPodSQLExecutor`, predicates, and the validation
 helpers (`ValidateSchemaVersion`, `ValidateImageRollback`,
 `ValidateStorageResize`, `ValidateRestoreCompatibility`,
 `NewImageVolumeProbe`). It adds no behavior of its own.
@@ -146,25 +159,51 @@ A second product:
 
    ```go
    adapter := cosmos.AccountAdapter{}
-   (&core.ClusterReconciler[*v1.Account]{
+   if err := (&core.ClusterReconciler[*v1.Account]{
        Client: mgr.GetClient(), Scheme: mgr.GetScheme(),
        Recorder: mgr.GetEventRecorderFor("account-controller"),
        SQLExecutor: core.NewPodSQLExecutor(mgr.GetClient(), clientset, mgr.GetConfig()),
-       Adapter: adapter, // Replication: nil -> single-region
-   }).SetupWithManager(mgr, "account")
-   (&core.CertificateReconciler[*v1.Account]{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Adapter: adapter}).SetupWithManager(mgr, "account-certificate")
-   (&core.PersistentVolumeReconciler[*v1.Account]{Client: mgr.GetClient(), Adapter: adapter}).SetupWithManager(mgr, "account-pv")
+       Adapter: adapter,
+       Replication: replication, // nil -> single-region
+   }).SetupWithManager(mgr, "account"); err != nil {
+       return err
+   }
+   if err := (&core.CertificateReconciler[*v1.Account]{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Adapter: adapter}).SetupWithManager(mgr, "account-certificate"); err != nil {
+       return err
+   }
+   if err := (&core.PersistentVolumeReconciler[*v1.Account]{Client: mgr.GetClient(), Adapter: adapter}).SetupWithManager(mgr, "account-pv"); err != nil {
+       return err
+   }
+   ```
+
+   A multi-region product implements `core.ReplicationHooks[*v1.Account]` and
+   returns its topology from `Context`:
+
+   ```go
+   func (accountReplication) Context(ctx context.Context, a *v1.Account) (*core.ReplicationContext, error) {
+       if a.Spec.Region != a.Spec.PrimaryRegion {
+           rc := core.NewReplicationContext(core.ReplicationReplica, "", "")
+           rc.PrimaryCNPGClusterName = a.Spec.PrimaryRegion
+           return rc, nil
+       }
+       // Hold the endpoint while a promotion to this region is pending.
+       return core.NewReplicationContext(core.ReplicationPrimary, a.Status.LocalPrimary, a.Status.TargetPrimary), nil
+   }
    ```
 
    It writes its own webhook on top of the `core.Validate*` helpers with its
    own `core.ValidationTerms`, and its own RBAC markers for its API group.
 3. Ships the shared sidecar-injector with its gateway image, setting
-   `ProductProfile.Gateway` when its gateway contract differs.
+   `ProductProfile.Gateway` when its gateway contract differs, and
+   `NamingProfile.HealthMetricName` and `MetricClusterAttribute` for its
+   monitoring names.
 
 `pkg/core/engine_test.go` defines a fake `Account` CR in another API group and
 drives `core.ClusterReconciler` with a fake client through finalizer, RBAC,
 CNPG `Cluster` creation with the second product's extension, and status,
-using only `pkg/core`.
+using only `pkg/core`. `pkg/core/replication_test.go` drives the cluster and
+backup reconcilers with replica, not-present, and promotion-pending contexts
+built with `core.NewReplicationContext`.
 `pkg/core/example_test.go` renders a non-DocumentDB cluster through the facade.
 `internal/cnpg/second_product_test.go` renders a synthetic `pgcosmos` product
 end to end and fails if any DocumentDB string other than the documented

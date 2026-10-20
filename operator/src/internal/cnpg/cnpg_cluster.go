@@ -421,11 +421,15 @@ func buildPostgresConfiguration(intent product.ClusterIntent, extensionImageSour
 }
 
 // addGatewayContractParams forwards a product's non-default gateway contract to
-// the sidecar injector. Unset fields are omitted so the injector keeps its
-// DocumentDB gateway defaults and existing parameter maps are unchanged.
+// the sidecar injector. Unset fields and values equal to the injector's
+// (DocumentDB gateway) defaults are omitted, matching the injector's own
+// normalization so existing parameter maps are unchanged and SyncCnpgCluster
+// does not fight the injector's defaulting webhook.
 func addGatewayContractParams(params map[string]string, gw product.GatewayProfile) {
-	addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_CONTAINER_NAME, gw.ContainerName)
-	if gw.Port > 0 {
+	if gw.ContainerName != util.PLUGIN_DEFAULT_GATEWAY_CONTAINER_NAME {
+		addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_CONTAINER_NAME, gw.ContainerName)
+	}
+	if gw.Port > 0 && gw.Port != util.PLUGIN_DEFAULT_GATEWAY_PORT {
 		params[util.PLUGIN_PARAM_GATEWAY_PORT] = strconv.FormatInt(int64(gw.Port), 10)
 	}
 	if gw.Args != nil {
@@ -433,8 +437,12 @@ func addGatewayContractParams(params map[string]string, gw product.GatewayProfil
 		args, _ := json.Marshal(gw.Args)
 		params[util.PLUGIN_PARAM_GATEWAY_ARGS] = string(args)
 	}
-	addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_USERNAME_ENV, gw.UsernameEnv)
-	addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_PASSWORD_ENV, gw.PasswordEnv)
+	if gw.UsernameEnv != util.PLUGIN_DEFAULT_GATEWAY_USERNAME_ENV {
+		addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_USERNAME_ENV, gw.UsernameEnv)
+	}
+	if gw.PasswordEnv != util.PLUGIN_DEFAULT_GATEWAY_PASSWORD_ENV {
+		addPluginParamIfSet(params, util.PLUGIN_PARAM_GATEWAY_PASSWORD_ENV, gw.PasswordEnv)
+	}
 }
 
 // OTelOptions maps the product naming onto the OTel collector config options.
@@ -442,5 +450,6 @@ func OTelOptions(p product.ProductProfile) otelcfg.Options {
 	return otelcfg.Options{
 		ClusterAttribute: p.Naming.MetricClusterAttribute,
 		Generator:        p.Naming.OperatorName,
+		HealthMetricName: p.Naming.HealthMetricName,
 	}
 }

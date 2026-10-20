@@ -24,8 +24,10 @@ import (
 // for ALL CNPG spec mutations (images + plugin params + replication).
 //
 // Mutable plugin parameters synced: gatewayImage, gatewayTLSSecret, sidecar
-// resource params, and OTel sidecar params (otelCollectorImage,
-// otelConfigMapName, prometheusPort, otelConfigHash).
+// resource params, OTel sidecar params (otelCollectorImage,
+// otelConfigMapName, prometheusPort, otelConfigHash), and the gateway contract
+// (gatewayContainerName, gatewayPort, gatewayArgs, gatewayUsernameEnv,
+// gatewayPasswordEnv).
 // Other parameters (e.g., documentDbCredentialSecret) are set at cluster creation
 // and do not change during the lifecycle of a DocumentDB resource.
 //
@@ -122,6 +124,13 @@ func SyncCnpgCluster(
 				util.PLUGIN_PARAM_OTEL_MEMORY_LIMIT,
 				util.PLUGIN_PARAM_OTEL_CPU_REQUEST,
 				util.PLUGIN_PARAM_OTEL_CPU_LIMIT,
+				// Gateway contract: the injector renders the gateway
+				// container from these at pod creation.
+				util.PLUGIN_PARAM_GATEWAY_CONTAINER_NAME,
+				util.PLUGIN_PARAM_GATEWAY_PORT,
+				util.PLUGIN_PARAM_GATEWAY_ARGS,
+				util.PLUGIN_PARAM_GATEWAY_USERNAME_ENV,
+				util.PLUGIN_PARAM_GATEWAY_PASSWORD_ENV,
 			}
 			for _, key := range sidecarParamKeys {
 				desiredVal := getParam(desiredPlugin.Parameters, key)

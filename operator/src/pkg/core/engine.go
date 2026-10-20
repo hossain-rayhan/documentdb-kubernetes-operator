@@ -45,7 +45,22 @@ type (
 	// cluster reconciler; nil runs every cluster as a single-region primary.
 	ReplicationHooks[T client.Object] = engine.ReplicationHooks[T]
 	ReplicationContext                = util.ReplicationContext
-	SQLExecutor                       = engine.SQLExecutor
+	// ReplicationState is the role of a cluster in its replication topology.
+	ReplicationState = util.ReplicationState
+	SQLExecutor      = engine.SQLExecutor
+)
+
+// Replication states for NewReplicationContext.
+const (
+	// NoReplication is a single-region primary; its endpoint is always enabled.
+	NoReplication = util.NoReplication
+	// ReplicationPrimary is the primary cluster of a replication topology.
+	ReplicationPrimary = util.Primary
+	// ReplicationReplica replicates from ReplicationContext.PrimaryCNPGClusterName.
+	ReplicationReplica = util.Replica
+	// ReplicationNotPresent is not a member of its topology; the cluster
+	// reconciler deletes the cluster's resources.
+	ReplicationNotPresent = util.NotPresent
 )
 
 const (
@@ -66,6 +81,16 @@ func NewPodSQLExecutor(c client.Client, clientset kubernetes.Interface, config *
 // primary cluster.
 func NewSingleRegionContext(name, environment, storageClass string) *ReplicationContext {
 	return util.NewSingleRegionContext(name, environment, storageClass)
+}
+
+// NewReplicationContext returns the replication context of a cluster in state,
+// for ReplicationHooks.Context. A replicating (primary or replica) cluster
+// serves its gateway endpoint only when currentLocalPrimary equals
+// targetLocalPrimary, so a pending promotion keeps the endpoint disabled.
+// The caller sets the exported topology fields (CNPGClusterName,
+// PrimaryCNPGClusterName, OtherCNPGClusterNames, StorageClass, ...).
+func NewReplicationContext(state ReplicationState, currentLocalPrimary, targetLocalPrimary string) *ReplicationContext {
+	return util.NewReplicationContext(state, currentLocalPrimary, targetLocalPrimary)
 }
 
 // GatewayPort is the gateway port of a profile, or the GATEWAY_PORT env default.

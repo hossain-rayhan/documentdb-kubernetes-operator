@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -14,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
+	otelcfg "github.com/documentdb/documentdb-operator/internal/otel"
 	"github.com/documentdb/documentdb-operator/internal/product"
 	util "github.com/documentdb/documentdb-operator/internal/utils"
 )
@@ -130,5 +132,32 @@ func TestSecondProductResourceValidationUsesProductPath(t *testing.T) {
 		if regexp.MustCompile(`^spec\.compute`).FindString(e.Field) == "" {
 			t.Errorf("error field %q is not under spec.compute", e.Field)
 		}
+	}
+}
+
+// TestSecondProductOtelConfigHash checks that the rendered config hash is the
+// hash of the collector config generated with the product's metric naming.
+func TestSecondProductOtelConfigHash(t *testing.T) {
+	req := ctrl.Request{}
+	req.Name, req.Namespace = "acct", "ns"
+	intent := pgcosmosIntent()
+	intent.Product.Naming = product.NamingProfile{
+		MetricClusterAttribute: "cosmos.cluster", OperatorName: "cosmos-operator", HealthMetricName: "cosmos.postgres.up",
+	}
+	data, err := otelcfg.GenerateConfigMapDataWithOptions(OTelOptions(intent.Product), "acct", "ns", intent.Monitoring)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(data["static.yaml"], "metric_name: cosmos.postgres.up\n") {
+		t.Fatalf("static.yaml:\n%s", data["static.yaml"])
+	}
+	got := GetCnpgClusterSpecFromIntent(req, intent, "acct-sa", "", true, logr.Discard()).Spec.Plugins[0].Parameters[util.PLUGIN_PARAM_OTEL_CONFIG_HASH]
+	if want := otelcfg.HashConfigMapData(data); got != want {
+		t.Fatalf("otelConfigHash = %q, want %q", got, want)
+	}
+
+	intent.Product.Naming.HealthMetricName = ""
+	if def := GetCnpgClusterSpecFromIntent(req, intent, "acct-sa", "", true, logr.Discard()).Spec.Plugins[0].Parameters[util.PLUGIN_PARAM_OTEL_CONFIG_HASH]; def == got {
+		t.Fatal("the health metric name does not affect the config hash")
 	}
 }
