@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
 	util "github.com/documentdb/documentdb-operator/internal/utils"
@@ -30,6 +31,17 @@ func TestDocumentDBNamingMatchesWireContract(t *testing.T) {
 	}
 	if long := n.ServiceName(strings.Repeat("a", 80)); len(long) != 63 {
 		t.Errorf("service name not truncated to 63: %d", len(long))
+	}
+}
+
+func TestServiceNameTruncationKeepsValidDNSLabel(t *testing.T) {
+	n := NamingProfile{ServicePrefix: "cosmos-gateway-"}
+	got := n.ServiceName(strings.Repeat("a", 47) + "-a")
+	if errs := validation.IsDNS1035Label(got); len(errs) != 0 {
+		t.Fatalf("truncating a valid cluster name produced invalid Service name %q: %v", got, errs)
+	}
+	if want := n.ServicePrefix + strings.Repeat("a", 47); got != want {
+		t.Fatalf("ServiceName = %q, want %q", got, want)
 	}
 }
 

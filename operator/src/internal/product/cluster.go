@@ -4,6 +4,8 @@
 package product
 
 import (
+	"strings"
+
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
@@ -48,11 +50,11 @@ func (n NamingProfile) SchemaVersionAnnotation() string { return n.Domain + "/sc
 func (n NamingProfile) Finalizer() string { return n.Domain + "/pv-retention-finalizer" }
 
 // ServiceName is the gateway Service name for a custom resource, truncated to
-// the 63-character Kubernetes name limit.
+// the 63-character Kubernetes name limit without leaving a trailing hyphen.
 func (n NamingProfile) ServiceName(clusterName string) string {
 	name := n.ServicePrefix + clusterName
 	if len(name) > 63 {
-		name = name[:63]
+		name = strings.TrimRight(name[:63], "-")
 	}
 	return name
 }

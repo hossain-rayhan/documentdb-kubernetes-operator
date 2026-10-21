@@ -78,9 +78,19 @@ unmodified.
   The ImageVolume probe uses a product-independent Kubernetes name prefix;
   display names such as `Cosmos DB` are used only in diagnostics.
 
-Extension and replication role names in the profile are unquoted PostgreSQL
-names. The lifecycle SQL helpers quote identifiers and catalog lookup literals,
-preserving mixed case and supporting names containing hyphens or quotes.
+Profiles are trusted operator configuration, not human-readable input to be
+automatically sanitized. Machine identifiers must satisfy their destination's
+rules: Kubernetes domains, Service/container/Secret names, environment variable
+names, PostgreSQL parameters, and OTel metric names have different constraints.
+`ProductProfile.Name` is a display name, not a machine identifier.
+
+Extension and replication role names are supplied without SQL quoting. The
+lifecycle SQL helpers quote identifiers and catalog lookup literals, preserving
+mixed case and supporting names containing hyphens or quotes. However,
+`ExtensionSpec.Name` is also the CNPG extension mount identifier: CNPG limits it
+to 1-59 characters matching `^[a-z0-9]([-a-z0-9_]*[a-z0-9])?$`. SQL quoting does
+not relax that separate constraint. Bootstrap SQL is product-authored SQL and
+is passed through verbatim.
 
 The DocumentDB controllers and webhook in `internal/controller` and
 `internal/webhook` are now thin wrappers over these packages. They keep their
@@ -127,6 +137,18 @@ port changes, the client Service's ports follow it; the Service keeps its
 assigned cluster IPs and node ports. See
 [the plugin configuration guide](../developer-guides/sidecar-injector-plugin-configuration.md).
 
+The configured plugin name must match the deployed plugin server's advertised
+identity. The shared injector binary advertises
+`cnpg-i-sidecar-injector.documentdb.io`; another product can reuse that identity
+and binary with its own gateway parameters. Merely changing the profile's
+plugin name does not rename the plugin server.
+
+Gateway certificate DNS names use the same `NamingProfile.ServiceName` helper
+as the gateway Service, including its 63-character truncation and removal of
+trailing hyphens at the truncation boundary. Truncation preserves the legacy
+naming convention, not uniqueness: product CRD name validation should reserve
+room for the Service prefix to avoid collisions between truncated names.
+
 ## Wire contracts kept on purpose
 
 These names are visible to running clusters or users. Renaming them would
@@ -154,6 +176,17 @@ helpers (`ValidateSchemaVersion`, `ValidateImageRollback`,
 `ValidateStorageResize`, `ValidateRestoreCompatibility`,
 `NewImageVolumeProbe`). It adds no behavior of its own.
 
+For a checked-out or mirrored source tree, the consuming module can use:
+
+```go
+require github.com/documentdb/documentdb-operator v0.0.0
+
+replace github.com/documentdb/documentdb-operator => ../documentdb-kubernetes-operator/operator/src
+```
+
+The replacement points at `operator/src`, the Go module, not the repository
+root. Pin the checkout or mirror to the reviewed source commit.
+
 A second product:
 
 1. Defines its own CRD and a `core.ClusterAdapter[*MyCR]` that returns its
@@ -161,6 +194,8 @@ A second product:
    `core.ClusterIntent`, `core.ClusterSpec`, and `core.ClusterStatus`. Backup
    support adds a `core.BackupAdapter[*MyBackup]` and
    `core.ScheduledBackupAdapter[*MySchedule]`.
+   `Intent.Product` must match `Profile()`, and overlapping operational inputs
+   such as monitoring must agree between `Intent` and `Spec`.
 2. Wires the generic reconcilers in its `main.go`:
 
    ```go
@@ -210,6 +245,11 @@ CNPG `Cluster` creation with the second product's extension, and status,
 using only `pkg/core`. `pkg/core/replication_test.go` drives the cluster and
 backup reconcilers with replica, not-present, and promotion-pending contexts
 built with `core.NewReplicationContext`.
+`pkg/core/second_product_test.go` reuses a `Cosmos DB` profile across rendering,
+cluster reconciliation, gateway contract updates/removal, TLS certificates,
+ImageVolume admission, and backup/PV restore metadata. It includes a separate
+`AccountBackup` custom resource, a hyphenated extension name, a mixed-case
+replication role, and Kubernetes name validation at probe and Service boundaries.
 `pkg/core/example_test.go` renders a non-DocumentDB cluster through the facade.
 `internal/cnpg/second_product_test.go` renders a synthetic `pgcosmos` product
 end to end and fails if any DocumentDB string other than the documented

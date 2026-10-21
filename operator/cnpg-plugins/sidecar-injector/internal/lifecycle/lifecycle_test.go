@@ -486,14 +486,16 @@ func TestLifecycleHookDefaultGatewayContract(t *testing.T) {
 
 func TestLifecycleHookCustomGatewayContract(t *testing.T) {
 	containers := runCreateHook(t, map[string]string{
-		"gatewayImage":         "cosmos-gw:1",
-		"gatewayContainerName": "pgcosmos-gateway",
-		"gatewayPort":          "8081",
-		"gatewayArgs":          `["--port","8081"]`,
-		"gatewayUsernameEnv":   "COSMOS_USER",
-		"gatewayPasswordEnv":   "COSMOS_KEY",
-		"otelCollectorImage":   "otel:1",
-		"otelConfigMapName":    "otel-config",
+		"gatewayImage":               "cosmos-gw:1",
+		"gatewayContainerName":       "pgcosmos-gateway",
+		"gatewayPort":                "8081",
+		"gatewayArgs":                `["--port","8081"]`,
+		"gatewayUsernameEnv":         "COSMOS_USER",
+		"gatewayPasswordEnv":         "COSMOS_KEY",
+		"documentDbCredentialSecret": "cosmos-credentials",
+		"gatewayTLSSecret":           "cosmos-gateway-tls",
+		"otelCollectorImage":         "otel:1",
+		"otelConfigMapName":          "otel-config",
 	})
 	if _, ok := containers[gatewayContainerName]; ok {
 		t.Fatal("default gateway container name leaked")
@@ -512,5 +514,18 @@ func TestLifecycleHookCustomGatewayContract(t *testing.T) {
 	if names[0] != "COSMOS_USER" || names[1] != "COSMOS_KEY" {
 		t.Errorf("env = %v", names)
 	}
+	for i, key := range []string{"username", "password"} {
+		source := gateway.Env[i].ValueFrom
+		if source == nil || source.SecretKeyRef == nil || source.SecretKeyRef.Name != "cosmos-credentials" ||
+			source.SecretKeyRef.Key != key {
+			t.Errorf("%s does not reference the product credential Secret key %s", gateway.Env[i].Name, key)
+		}
+	}
+	if len(gateway.VolumeMounts) != 1 || gateway.VolumeMounts[0].Name != "gateway-tls" ||
+		gateway.VolumeMounts[0].MountPath != "/tls" || !gateway.VolumeMounts[0].ReadOnly {
+		t.Errorf("gateway TLS mount = %+v", gateway.VolumeMounts)
+	}
+	assertEnvValue(t, gateway.Env, "CERT_PATH", "/tls/tls.crt")
+	assertEnvValue(t, gateway.Env, "KEY_FILE", "/tls/tls.key")
 	assertEnvValue(t, gateway.Env, "OTEL_METRICS_ENABLED", "true")
 }

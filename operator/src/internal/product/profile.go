@@ -69,7 +69,9 @@ type GatewayProfile struct {
 // extension image through CNPG's ImageVolume extension support.
 type ExtensionSpec struct {
 	// Name is the CNPG extension entry name and the PostgreSQL extension name
-	// used for CREATE/ALTER EXTENSION and version discovery.
+	// used for CREATE/ALTER EXTENSION and version discovery. It must satisfy
+	// CNPG's extension-name constraints (1-59 characters, lowercase letters,
+	// digits, internal hyphens/underscores, and alphanumeric ends).
 	Name string
 	// DynamicLibraryPath, ExtensionControlPath, and LdLibraryPath are the
 	// image-relative paths CNPG adds to the PostgreSQL search paths.

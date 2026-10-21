@@ -91,7 +91,8 @@ func replicationScheme(t *testing.T) *runtime.Scheme {
 			t.Fatal(err)
 		}
 	}
-	scheme.AddKnownTypes(accountGV, &account{}, &accountList{})
+	scheme.AddKnownTypeWithName(accountGV.WithKind("Account"), &account{})
+	scheme.AddKnownTypeWithName(accountGV.WithKind("AccountList"), &accountList{})
 	metav1.AddToGroupVersion(scheme, accountGV)
 	return scheme
 }

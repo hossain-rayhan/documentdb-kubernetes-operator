@@ -40,16 +40,20 @@ type accountSpec struct {
 }
 
 type accountStatus struct {
-	State         string `json:"state,omitempty"`
-	Endpoint      string `json:"endpoint,omitempty"`
-	SchemaVersion string `json:"schemaVersion,omitempty"`
-	Engine        string `json:"engine,omitempty"`
-	Gateway       string `json:"gateway,omitempty"`
+	State         string               `json:"state,omitempty"`
+	Endpoint      string               `json:"endpoint,omitempty"`
+	SchemaVersion string               `json:"schemaVersion,omitempty"`
+	Engine        string               `json:"engine,omitempty"`
+	Gateway       string               `json:"gateway,omitempty"`
+	TLS           *dbpreview.TLSStatus `json:"tls,omitempty"`
 }
 
 func (a *account) DeepCopyObject() runtime.Object {
 	out := *a
 	a.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	if a.Status.TLS != nil {
+		out.Status.TLS = a.Status.TLS.DeepCopy()
+	}
 	return &out
 }
 
@@ -114,6 +118,7 @@ func (accountAdapter) Status(obj *account) core.ClusterStatus {
 		SchemaVersion:    obj.Status.SchemaVersion,
 		ExtensionImage:   obj.Status.Engine,
 		GatewayImage:     obj.Status.Gateway,
+		TLS:              obj.Status.TLS,
 	}
 }
 
@@ -123,6 +128,7 @@ func (accountAdapter) SetStatus(obj *account, s core.ClusterStatus) {
 	obj.Status.SchemaVersion = s.SchemaVersion
 	obj.Status.Engine = s.ExtensionImage
 	obj.Status.Gateway = s.GatewayImage
+	obj.Status.TLS = s.TLS
 }
 
 func (accountAdapter) ConnectionString(obj *account, host string, port int32, _ bool) string {
@@ -140,7 +146,8 @@ func TestClusterReconcilerSecondProduct(t *testing.T) {
 	if err := cnpgv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	scheme.AddKnownTypes(accountGV, &account{}, &accountList{})
+	scheme.AddKnownTypeWithName(accountGV.WithKind("Account"), &account{})
+	scheme.AddKnownTypeWithName(accountGV.WithKind("AccountList"), &accountList{})
 	metav1.AddToGroupVersion(scheme, accountGV)
 
 	acct := &account{
@@ -251,7 +258,8 @@ func TestSecondProductMonitoringConfig(t *testing.T) {
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	scheme.AddKnownTypes(accountGV, &account{}, &accountList{})
+	scheme.AddKnownTypeWithName(accountGV.WithKind("Account"), &account{})
+	scheme.AddKnownTypeWithName(accountGV.WithKind("AccountList"), &accountList{})
 	metav1.AddToGroupVersion(scheme, accountGV)
 	acct := &account{ObjectMeta: metav1.ObjectMeta{Name: "acct", Namespace: "ns", UID: "uid-1"}}
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()

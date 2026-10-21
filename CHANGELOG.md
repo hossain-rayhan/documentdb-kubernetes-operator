@@ -6,6 +6,7 @@
 - Require Go 1.26.10 across all six modules and pin Go builder images to that patch release to address [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809) in `crypto/x509`. Unit-test workflows now resolve Go from the operator module instead of an older hard-coded version.
 
 ### Bug Fixes
+- Keep truncated gateway Service names DNS-valid and gateway certificate DNS names aligned with the actual Service name.
 - Quote product-defined extension and replication role names in lifecycle SQL, and use a product-independent ImageVolume probe name so display names such as `Cosmos DB` do not bypass capability checks.
 
 ### Major Features
