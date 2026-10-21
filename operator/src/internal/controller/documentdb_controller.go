@@ -24,6 +24,7 @@ import (
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
 	cnpg "github.com/documentdb/documentdb-operator/internal/cnpg"
 	"github.com/documentdb/documentdb-operator/internal/engine"
+	"github.com/documentdb/documentdb-operator/internal/imagemode"
 	"github.com/documentdb/documentdb-operator/internal/product"
 	util "github.com/documentdb/documentdb-operator/internal/utils"
 )
@@ -50,6 +51,11 @@ type DocumentDBReconciler struct {
 	// Defaults to engine.NewPodSQLExecutor (real pod exec via SPDY). Override in tests
 	// to inject canned responses without requiring a live Kubernetes cluster.
 	SQLExecutor func(ctx context.Context, cluster *cnpgv1.Cluster, sqlCommand string) (string, error)
+	// ImageModeDetector decides the image mode (ImageVolume or combined) for a
+	// new CNPG cluster in the given namespace and returns a reason. Defaults to
+	// imagemode.Detector in SetupWithManager. When nil (unit tests), new
+	// clusters use ImageVolume mode.
+	ImageModeDetector func(ctx context.Context, namespace string) (imagemode.Mode, string, error)
 }
 
 var reconcileMutex sync.Mutex
@@ -66,6 +72,8 @@ func (r *DocumentDBReconciler) engine() *engine.ClusterReconciler[*dbpreview.Doc
 		Adapter:     product.DocumentDBAdapter{},
 		Replication: documentDBReplication{r},
 		Mutex:       &reconcileMutex,
+
+		ImageModeDetector: r.ImageModeDetector,
 	}
 }
 
@@ -75,6 +83,7 @@ func (r *DocumentDBReconciler) engine() *engine.ClusterReconciler[*dbpreview.Doc
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
 func (r *DocumentDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	return r.engine().Reconcile(ctx, req)
 }
@@ -170,6 +179,10 @@ func (r *DocumentDBReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("Clientset must be configured: required for SQL execution against the CNPG primary")
 	}
 
+	if r.ImageModeDetector == nil {
+		detector := &imagemode.Detector{Client: r.Client, Clientset: r.Clientset}
+		r.ImageModeDetector = detector.Detect
+	}
 	if r.SQLExecutor == nil {
 		r.SQLExecutor = engine.NewPodSQLExecutor(r.Client, r.Clientset, r.Config)
 	}

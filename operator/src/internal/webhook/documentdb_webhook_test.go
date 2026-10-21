@@ -265,7 +265,15 @@ var _ = Describe("ValidateCreate admission handler", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("blocks creation when the cluster lacks ImageVolume support", func() {
+	It("admits creation without ImageVolume support in the default auto mode", func() {
+		v = newValidatorWithCreate(nil, rejectImageVolume)
+		db := newTestDocumentDB("0.112.0", "", "")
+		_, err := v.ValidateCreate(context.Background(), db)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("blocks creation when imageMode=imageVolume and the cluster lacks ImageVolume support", func() {
+		GinkgoT().Setenv(util.DOCUMENTDB_IMAGE_MODE_ENV, "imageVolume")
 		v = newValidatorWithCreate(nil, rejectImageVolume)
 		db := newTestDocumentDB("0.112.0", "", "")
 		_, err := v.ValidateCreate(context.Background(), db)

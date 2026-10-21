@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -570,6 +571,47 @@ func envOr(key, def string) string {
 // back to the compiled-in default.
 func ExtensionImageRepo() string {
 	return envOr(DOCUMENTDB_EXTENSION_IMAGE_REPO_ENV, DOCUMENTDB_EXTENSION_IMAGE_REPO)
+}
+
+// CombinedImageRepo returns the combined PostgreSQL + DocumentDB image
+// repository, honoring the DOCUMENTDB_COMBINED_IMAGE_REPO env override.
+func CombinedImageRepo() string {
+	return envOr(DOCUMENTDB_COMBINED_IMAGE_REPO_ENV, DOCUMENTDB_COMBINED_IMAGE_REPO)
+}
+
+// combinedVersionTagPattern matches tags that name a DocumentDB release
+// (e.g. "1.0.0", "0.117.0", "1.0-RC2"), as opposed to "latest" or the
+// change-stream tags, which have no combined counterpart.
+var combinedVersionTagPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+`)
+
+// CombinedImage returns the combined PostgreSQL + DocumentDB image for a
+// cluster: <combined repo>:<pg major>-<version>. The version is the tag of an
+// explicit extension image when that tag names a release, otherwise the first
+// non-empty of specVersion, envVersion, and DEFAULT_DOCUMENTDB_TAG. Only the
+// version is carried over; the repository always comes from CombinedImageRepo.
+func CombinedImage(explicitExtensionImage, specVersion, envVersion string) string {
+	version := ImageTag(explicitExtensionImage)
+	if !combinedVersionTagPattern.MatchString(version) {
+		version = specVersion
+	}
+	if version == "" {
+		version = envVersion
+	}
+	if version == "" {
+		version = DEFAULT_DOCUMENTDB_TAG
+	}
+	return fmt.Sprintf("%s:%s-%s", CombinedImageRepo(), COMBINED_IMAGE_PG_MAJOR, version)
+}
+
+// ImageTag returns the tag of an image reference, or "" when the reference has
+// no tag. Digests are ignored and a registry port is not mistaken for a tag.
+func ImageTag(image string) string {
+	ref, _, _ := strings.Cut(image, "@")
+	lastSlash := strings.LastIndex(ref, "/")
+	if i := strings.LastIndex(ref, ":"); i > lastSlash {
+		return ref[i+1:]
+	}
+	return ""
 }
 
 // GatewayImageRepo returns the gateway image repository (host+path, no tag),
