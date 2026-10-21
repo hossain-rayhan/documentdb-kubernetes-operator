@@ -75,6 +75,12 @@ unmodified.
 - **`internal/validation`** holds the admission rules (schema version vs.
   binary, image rollback, storage resize, restore compatibility, ImageVolume
   probe). They take `Terms` so error messages use the product's field names.
+  The ImageVolume probe uses a product-independent Kubernetes name prefix;
+  display names such as `Cosmos DB` are used only in diagnostics.
+
+Extension and replication role names in the profile are unquoted PostgreSQL
+names. The lifecycle SQL helpers quote identifiers and catalog lookup literals,
+preserving mixed case and supporting names containing hyphens or quotes.
 
 The DocumentDB controllers and webhook in `internal/controller` and
 `internal/webhook` are now thin wrappers over these packages. They keep their

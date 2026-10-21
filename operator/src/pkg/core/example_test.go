@@ -40,7 +40,7 @@ func Example() {
 	// Output:
 	// pgcosmos
 	// operator
-	// ALTER EXTENSION pgcosmos UPDATE
+	// ALTER EXTENSION "pgcosmos" UPDATE
 }
 
 // ExampleNewReplicationContext builds the contexts a product's

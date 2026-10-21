@@ -122,10 +122,10 @@ func TestFacadeExtensionLifecycleHelpers(t *testing.T) {
 	if got := core.ExtensionVersionSQL("widget"); !strings.Contains(got, "name = 'widget'") {
 		t.Fatalf("ExtensionVersionSQL = %q", got)
 	}
-	if got := core.ExtensionUpdateSQL("widget", "1.2-3"); got != "ALTER EXTENSION widget UPDATE TO '1.2-3'" {
+	if got := core.ExtensionUpdateSQL("widget", "1.2-3"); got != `ALTER EXTENSION "widget" UPDATE TO '1.2-3'` {
 		t.Fatalf("ExtensionUpdateSQL = %q", got)
 	}
-	if got := core.ReplicationRoleGrantSQL("widget_admin"); got != "GRANT widget_admin TO streaming_replica;" {
+	if got := core.ReplicationRoleGrantSQL("widget_admin"); got != `GRANT "widget_admin" TO streaming_replica;` {
 		t.Fatalf("ReplicationRoleGrantSQL = %q", got)
 	}
 

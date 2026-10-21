@@ -98,7 +98,8 @@ func ValidateResources(res Resources, monitoring bool, base *field.Path, cfg Spl
 // ExtensionVersionSQL queries the default and installed versions of extension.
 func ExtensionVersionSQL(extension string) string { return cnpg.ExtensionVersionSQL(extension) }
 
-// ExtensionUpdateSQL upgrades extension, to targetVersion when set.
+// ExtensionUpdateSQL upgrades extension, to targetVersion when set. Pass the
+// unquoted extension name; it is quoted as a SQL identifier.
 func ExtensionUpdateSQL(extension, targetVersion string) string {
 	return cnpg.ExtensionUpdateSQL(extension, targetVersion)
 }
@@ -106,7 +107,8 @@ func ExtensionUpdateSQL(extension, targetVersion string) string {
 // ReplicationRoleCheckSQL checks whether streaming_replica is a member of role.
 func ReplicationRoleCheckSQL(role string) string { return cnpg.ReplicationRoleCheckSQL(role) }
 
-// ReplicationRoleGrantSQL grants role to streaming_replica.
+// ReplicationRoleGrantSQL grants role to streaming_replica. Pass the unquoted
+// role name; it is quoted as a SQL identifier.
 func ReplicationRoleGrantSQL(role string) string { return cnpg.ReplicationRoleGrantSQL(role) }
 
 // ExtensionImage returns the image currently mounted for extension in cluster.

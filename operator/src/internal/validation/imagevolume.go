@@ -6,7 +6,6 @@ package validation
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	"github.com/go-logr/logr"
@@ -35,7 +34,7 @@ type ImageVolumeProbe struct {
 	// administrator enables the feature gate later the next create re-probes and
 	// succeeds without restarting the operator.
 	Confirmed *atomic.Bool
-	// Product names the operator and extension in the error message.
+	// Product is a display name used only in the error message.
 	Product string
 	Log     logr.Logger
 }
@@ -143,7 +142,7 @@ func hasImageVolume(pod *corev1.Pod) bool {
 func (v *ImageVolumeProbe) dryRunProbePod(ctx context.Context, namespace string, volume corev1.Volume) (*corev1.Pod, error) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: strings.ToLower(v.Product) + "-imagevolume-preflight-",
+			GenerateName: "imagevolume-preflight-",
 			Namespace:    namespace,
 		},
 		Spec: corev1.PodSpec{
