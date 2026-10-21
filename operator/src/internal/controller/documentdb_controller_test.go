@@ -28,6 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
+	"github.com/documentdb/documentdb-operator/internal/imagemode"
+	"github.com/documentdb/documentdb-operator/internal/product"
 	util "github.com/documentdb/documentdb-operator/internal/utils"
 )
 
@@ -1639,6 +1641,34 @@ var _ = Describe("DocumentDB Controller", func() {
 	})
 
 	Describe("updateImageStatus", func() {
+		It("should report the combined PostgreSQL image when no extension image is mounted", func() {
+			cluster := &cnpgv1.Cluster{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{imagemode.AnnotationKey: string(imagemode.Combined)}},
+				Spec: cnpgv1.ClusterSpec{
+					ImageName: "documentdb/documentdb-combined:18-1.0.0",
+					Plugins: []cnpgv1.PluginConfiguration{{
+						Name:       "documentdb-sidecar",
+						Parameters: map[string]string{"gatewayImage": "documentdb/gateway:1.0.0"},
+					}},
+				},
+			}
+			documentdb := &dbpreview.DocumentDB{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-documentdb", Namespace: clusterNamespace},
+			}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(documentdb).
+				WithStatusSubresource(&dbpreview.DocumentDB{}).
+				Build()
+			reconciler := &DocumentDBReconciler{Client: fakeClient, Scheme: scheme}
+
+			Expect(reconciler.updateImageStatus(ctx, documentdb, cluster)).To(Succeed())
+
+			updatedDB := &dbpreview.DocumentDB{}
+			Expect(fakeClient.Get(ctx, types.NamespacedName{Name: "test-documentdb", Namespace: clusterNamespace}, updatedDB)).To(Succeed())
+			Expect(updatedDB.Status.DocumentDBImage).To(Equal("documentdb/documentdb-combined:18-1.0.0"))
+		})
+
 		It("should set DocumentDBImage and GatewayImage from cluster spec", func() {
 			cluster := &cnpgv1.Cluster{
 				Spec: cnpgv1.ClusterSpec{
@@ -1835,6 +1865,74 @@ var _ = Describe("DocumentDB Controller", func() {
 			err := reconciler.updateImageStatus(ctx, documentdb, cluster)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("failed to update DocumentDB image status"))
+		})
+	})
+
+	Describe("selectImageMode", func() {
+		desired := func() *cnpgv1.Cluster {
+			return &cnpgv1.Cluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+				Spec: cnpgv1.ClusterSpec{
+					ImageName: "ghcr.io/cloudnative-pg/postgresql:18-minimal-trixie",
+					PostgresConfiguration: cnpgv1.PostgresConfiguration{
+						Extensions: []cnpgv1.ExtensionConfiguration{{
+							Name:              "documentdb",
+							ImageVolumeSource: corev1.ImageVolumeSource{Reference: "documentdb:1.0.0"},
+						}},
+					},
+				},
+			}
+		}
+		intent := product.ClusterIntent{Images: product.Images{Combined: "documentdb-combined:18-1.0.0"}}
+
+		It("renders combined mode when the detector selects it", func() {
+			var gotNamespace string
+			r := &DocumentDBReconciler{ImageModeDetector: func(_ context.Context, ns string) (imagemode.Mode, string, error) {
+				gotNamespace = ns
+				return imagemode.Combined, "containerd 1.7", nil
+			}}
+			cluster := desired()
+			mode, reason, err := r.selectImageMode(ctx, cluster, intent)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(gotNamespace).To(Equal("ns"))
+			Expect(mode).To(Equal(imagemode.Combined))
+			Expect(reason).To(Equal("containerd 1.7"))
+			Expect(cluster.Spec.ImageName).To(Equal("documentdb-combined:18-1.0.0"))
+			Expect(cluster.Spec.PostgresConfiguration.Extensions).To(BeEmpty())
+			Expect(cluster.Annotations).To(HaveKeyWithValue(imagemode.AnnotationKey, "combined"))
+		})
+
+		It("keeps ImageVolume rendering when the detector selects it", func() {
+			r := &DocumentDBReconciler{ImageModeDetector: func(context.Context, string) (imagemode.Mode, string, error) {
+				return imagemode.ImageVolume, "supported", nil
+			}}
+			cluster := desired()
+			_, _, err := r.selectImageMode(ctx, cluster, intent)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(cluster.Spec.ImageName).To(Equal("ghcr.io/cloudnative-pg/postgresql:18-minimal-trixie"))
+			Expect(cluster.Spec.PostgresConfiguration.Extensions).To(HaveLen(1))
+			Expect(cluster.Annotations).To(HaveKeyWithValue(imagemode.AnnotationKey, "imageVolume"))
+		})
+
+		It("defaults to ImageVolume when no detector is configured", func() {
+			cluster := desired()
+			mode, _, err := (&DocumentDBReconciler{}).selectImageMode(ctx, cluster, intent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mode).To(Equal(imagemode.ImageVolume))
+			Expect(cluster.Spec.PostgresConfiguration.Extensions).To(HaveLen(1))
+		})
+
+		It("leaves the cluster untouched when detection fails", func() {
+			r := &DocumentDBReconciler{ImageModeDetector: func(context.Context, string) (imagemode.Mode, string, error) {
+				return "", "", fmt.Errorf("apiserver timeout")
+			}}
+			cluster := desired()
+			_, _, err := r.selectImageMode(ctx, cluster, intent)
+			Expect(err).To(MatchError(ContainSubstring("apiserver timeout")))
+			Expect(cluster.Annotations).NotTo(HaveKey(imagemode.AnnotationKey))
+			Expect(cluster.Spec.PostgresConfiguration.Extensions).To(HaveLen(1))
 		})
 	})
 

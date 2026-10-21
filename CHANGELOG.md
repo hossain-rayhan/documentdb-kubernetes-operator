@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Major Features
+- **Combined-image fallback when ImageVolume is unavailable**: A new Helm value `imageMode` (`auto` by default, or `imageVolume` / `combined`) controls how the DocumentDB extension reaches PostgreSQL pods. In `auto` mode the operator checks node container runtimes (containerd ≥ 2.1 or CRI-O ≥ 1.33) and probes the ImageVolume API when a `DocumentDB` is first created; if either check fails it deploys the new `documentdb-combined:18-<version>` image (PostgreSQL 18 + DocumentDB in one image) instead of rejecting the resource. The choice is recorded in the `documentdb.io/image-mode` annotation and is never changed for an existing cluster, and engine upgrades in combined mode roll the combined image tag. The chart's `kubeVersion` floor drops to `>= 1.30.0-0`, and the operator ClusterRole now needs `get`/`list` on `nodes`. Set `imageMode: imageVolume` to keep the previous fail-fast webhook rejection. See [the design](docs/designs/combined-image-fallback.md).
+
+### Bug Fixes
+- The DocumentDB controller now has an event recorder, so its events (`ImageModeSelected`, `PVsRetained`, `ExtensionRollback`, `SchemaUpdateAvailable`) are actually emitted; previously they were silently dropped.
+
 ## [1.0.0] - 2026-10-19
 
 First generally available operator release, for DocumentDB 1.0. The operator and the DocumentDB engine keep separate version numbers; this chart deploys engine `1.0.0` (extension schema `1.0-0`) by default. See [Upgrading to DocumentDB 1.0](docs/operator-public-documentation/preview/operations/upgrades.md#upgrading-to-documentdb-10).

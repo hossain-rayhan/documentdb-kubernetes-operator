@@ -35,6 +35,7 @@ import (
 
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
 	cnpg "github.com/documentdb/documentdb-operator/internal/cnpg"
+	"github.com/documentdb/documentdb-operator/internal/imagemode"
 	otelcfg "github.com/documentdb/documentdb-operator/internal/otel"
 	"github.com/documentdb/documentdb-operator/internal/product"
 	util "github.com/documentdb/documentdb-operator/internal/utils"
@@ -64,6 +65,11 @@ type DocumentDBReconciler struct {
 	// Defaults to executeSQLCommand (real pod exec via SPDY). Override in tests
 	// to inject canned responses without requiring a live Kubernetes cluster.
 	SQLExecutor func(ctx context.Context, cluster *cnpgv1.Cluster, sqlCommand string) (string, error)
+	// ImageModeDetector decides the image mode (ImageVolume or combined) for a
+	// new CNPG cluster in the given namespace and returns a reason. Defaults to
+	// imagemode.Detector in SetupWithManager. When nil (unit tests), new
+	// clusters use ImageVolume mode.
+	ImageModeDetector func(ctx context.Context, namespace string) (imagemode.Mode, string, error)
 }
 
 var reconcileMutex sync.Mutex
@@ -74,6 +80,7 @@ var reconcileMutex sync.Mutex
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
 func (r *DocumentDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	reconcileMutex.Lock()
 	defer reconcileMutex.Unlock()
@@ -187,15 +194,31 @@ func (r *DocumentDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: desiredCnpgCluster.Name, Namespace: req.Namespace}, currentCnpgCluster); err != nil {
 		if errors.IsNotFound(err) {
+			mode, reason, err := r.selectImageMode(ctx, desiredCnpgCluster, intent)
+			if err != nil {
+				logger.Error(err, "Failed to detect image mode; retrying before creating the CNPG Cluster")
+				return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
+			}
 			if err := r.Client.Create(ctx, desiredCnpgCluster); err != nil {
 				logger.Error(err, "Failed to create CNPG Cluster")
 				return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
 			}
-			logger.Info("CNPG Cluster created successfully", "Cluster.Name", desiredCnpgCluster.Name, "Namespace", desiredCnpgCluster.Namespace)
+			logger.Info("CNPG Cluster created successfully", "Cluster.Name", desiredCnpgCluster.Name, "Namespace", desiredCnpgCluster.Namespace,
+				"imageMode", mode, "reason", reason)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(documentdb, corev1.EventTypeNormal, "ImageModeSelected",
+					"Using %s image mode (image %s): %s", mode, desiredCnpgCluster.Spec.ImageName, reason)
+			}
 			return ctrl.Result{RequeueAfter: RequeueAfterLong}, nil
 		}
 		logger.Error(err, "Failed to get CNPG Cluster")
 		return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
+	}
+
+	// The image mode is fixed when the CNPG Cluster is created; keep rendering an
+	// existing combined-mode cluster in combined mode.
+	if cnpg.IsCombinedImageMode(currentCnpgCluster) {
+		cnpg.ApplyCombinedImageMode(desiredCnpgCluster, intent.Images.Combined)
 	}
 
 	// Build replication patch ops (performs side effects: HTTP token reads, service creation).
@@ -527,6 +550,10 @@ func (r *DocumentDBReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("Clientset must be configured: required for SQL execution against the CNPG primary")
 	}
 
+	if r.ImageModeDetector == nil {
+		detector := &imagemode.Detector{Client: r.Client, Clientset: r.Clientset}
+		r.ImageModeDetector = detector.Detect
+	}
 	if r.SQLExecutor == nil {
 		r.SQLExecutor = r.executeSQLCommand
 	}
@@ -981,17 +1008,41 @@ func (r *DocumentDBReconciler) determineSchemaTarget(
 	}
 }
 
+// selectImageMode decides the image mode for a CNPG Cluster about to be
+// created, renders desired accordingly, and records the mode as an annotation.
+func (r *DocumentDBReconciler) selectImageMode(ctx context.Context, desired *cnpgv1.Cluster, intent product.ClusterIntent) (imagemode.Mode, string, error) {
+	mode, reason := imagemode.ImageVolume, "image mode detection not configured"
+	if r.ImageModeDetector != nil {
+		var err error
+		if mode, reason, err = r.ImageModeDetector(ctx, desired.Namespace); err != nil {
+			return "", "", err
+		}
+	}
+	if mode == imagemode.Combined {
+		cnpg.ApplyCombinedImageMode(desired, intent.Images.Combined)
+	}
+	if desired.Annotations == nil {
+		desired.Annotations = map[string]string{}
+	}
+	desired.Annotations[imagemode.AnnotationKey] = string(mode)
+	return mode, reason, nil
+}
+
 // updateImageStatus reads the current extension and gateway images from the CNPG cluster
 // and persists them into the DocumentDB status fields. This is a no-op if both fields
 // are already up to date.
 func (r *DocumentDBReconciler) updateImageStatus(ctx context.Context, documentdb *dbpreview.DocumentDB, cluster *cnpgv1.Cluster) error {
-	// Read current extension image
+	// Read current extension image. In combined image mode the extension ships
+	// inside the PostgreSQL image, so report that image instead.
 	currentExtImage := ""
 	for _, ext := range cluster.Spec.PostgresConfiguration.Extensions {
 		if ext.Name == "documentdb" {
 			currentExtImage = ext.ImageVolumeSource.Reference
 			break
 		}
+	}
+	if currentExtImage == "" && cnpg.IsCombinedImageMode(cluster) {
+		currentExtImage = cluster.Spec.ImageName
 	}
 
 	// Read current gateway image
