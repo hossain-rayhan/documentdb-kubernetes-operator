@@ -249,9 +249,15 @@ func findDocumentDBServiceEndpoint(ctx context.Context, clientset kubernetes.Int
 	if err != nil {
 		return "", fmt.Errorf("list services: %w", err)
 	}
-	for _, svc := range services.Items {
-		if strings.HasPrefix(svc.Name, documentdbServicePrefix) && (strings.Contains(svc.Name, clusterName) || strings.Contains(svc.Name, documentName)) {
-			return renderServiceEndpoint(&svc), nil
+	// The operator shortens long Service names with a hash suffix, so match
+	// the Service by its controlling DocumentDB rather than by name; a name
+	// substring could select another cluster's Service.
+	for idx := range services.Items {
+		svc := &services.Items[idx]
+		owner := metav1.GetControllerOf(svc)
+		if strings.HasPrefix(svc.Name, documentdbServicePrefix) && owner != nil &&
+			owner.Kind == "DocumentDB" && owner.Name == documentName {
+			return renderServiceEndpoint(svc), nil
 		}
 	}
 

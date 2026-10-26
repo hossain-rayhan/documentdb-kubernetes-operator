@@ -22,7 +22,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
+	"strings"
 
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/environment"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/forwardconnection"
@@ -37,8 +39,10 @@ import (
 const GatewayPort = 10260
 
 // ServiceNamePrefix mirrors DOCUMENTDB_SERVICE_PREFIX from the operator.
-// The fully-qualified service name is ServiceNamePrefix + dd.Name,
-// truncated to 63 characters to honour the Kubernetes DNS limit.
+// The Service name is ServiceNamePrefix + dd.Name; when that exceeds 63
+// characters the operator keeps the first 54 and appends "-" plus the
+// FNV-32a hash of dd.Name (see utils.GatewayServiceName). E2E clusters are
+// created fresh, so the operator's legacy plainly truncated name never applies.
 const ServiceNamePrefix = "documentdb-service-"
 
 // GatewayServiceName returns the Service name the operator creates for
@@ -48,10 +52,13 @@ func GatewayServiceName(dd *previewv1.DocumentDB) string {
 		return ""
 	}
 	name := ServiceNamePrefix + dd.Name
-	if len(name) > 63 {
-		name = name[:63]
+	if len(name) <= 63 {
+		return name
 	}
-	return name
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(dd.Name))
+	suffix := fmt.Sprintf("-%08x", h.Sum32())
+	return strings.TrimRight(name[:63-len(suffix)], "-") + suffix
 }
 
 // OpenWithErr establishes a port-forward from localPort on the caller's

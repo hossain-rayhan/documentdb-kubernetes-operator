@@ -184,7 +184,10 @@ func (r *CertificateReconciler[T]) ensureCertManagerManagedCert(ctx context.Cont
 		secretName = obj.GetName() + "-gateway-cert-tls"
 	}
 
-	serviceBase := r.Adapter.Profile().Naming.ServiceName(obj.GetName())
+	serviceBase, err := gatewayServiceName(ctx, r.Client, r.Adapter.Profile().Naming, obj)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	baseDNS := []string{serviceBase, serviceBase + "." + obj.GetNamespace(), serviceBase + "." + obj.GetNamespace() + ".svc"}
 	dnsSet := map[string]struct{}{}
 	finalDNS := []string{}
@@ -284,7 +287,10 @@ func (r *CertificateReconciler[T]) ensureSelfSignedCert(ctx context.Context, obj
 		}
 	}
 
-	serviceBase := r.Adapter.Profile().Naming.ServiceName(obj.GetName())
+	serviceBase, err := gatewayServiceName(ctx, r.Client, r.Adapter.Profile().Naming, obj)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	dnsNames := []string{
 		serviceBase,
 		serviceBase + "." + namespace,

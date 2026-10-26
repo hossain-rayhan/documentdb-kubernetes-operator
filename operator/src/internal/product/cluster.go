@@ -4,11 +4,10 @@
 package product
 
 import (
-	"strings"
-
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
+	util "github.com/documentdb/documentdb-operator/internal/utils"
 )
 
 // NamingProfile carries the product's Kubernetes naming conventions: the domain
@@ -49,14 +48,21 @@ func (n NamingProfile) SchemaVersionAnnotation() string { return n.Domain + "/sc
 // Finalizer is the custom resource finalizer used to warn about retained PVs.
 func (n NamingProfile) Finalizer() string { return n.Domain + "/pv-retention-finalizer" }
 
-// ServiceName is the gateway Service name for a custom resource, truncated to
-// the 63-character Kubernetes name limit without leaving a trailing hyphen.
+// ServiceName is the gateway Service name for a custom resource:
+// ServicePrefix+clusterName, or, when that exceeds the 63-character Kubernetes
+// name limit, a truncated form ending in a hash of clusterName so distinct
+// clusters never share a Service. ServicePrefix must stay under 55 characters
+// so long names keep it.
 func (n NamingProfile) ServiceName(clusterName string) string {
-	name := n.ServicePrefix + clusterName
-	if len(name) > 63 {
-		name = strings.TrimRight(name[:63], "-")
-	}
-	return name
+	return util.GatewayServiceName(n.ServicePrefix, clusterName)
+}
+
+// LegacyServiceName is the plainly truncated gateway Service name that earlier
+// releases created for clusterName, reported only when it differs from the
+// current scheme; existing clusters keep that Service so their endpoint does
+// not change.
+func (n NamingProfile) LegacyServiceName(clusterName string) (string, bool) {
+	return util.LegacyGatewayServiceName(n.ServicePrefix, clusterName)
 }
 
 // ClusterSpec is the product-neutral, read-only view of the operational inputs

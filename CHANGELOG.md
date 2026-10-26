@@ -6,7 +6,7 @@
 - Require Go 1.26.10 across all six modules and pin Go builder images to that patch release to address [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809) in `crypto/x509`. Unit-test workflows now resolve Go from the operator module instead of an older hard-coded version.
 
 ### Bug Fixes
-- Keep truncated gateway Service names DNS-valid and gateway certificate DNS names aligned with the actual Service name.
+- Give each cluster its own gateway Service when `documentdb-service-<name>` exceeds 63 characters: long names are shortened with a stable hash of the cluster name instead of plain truncation, which could make two clusters share one Service and publish the other cluster's endpoint. Clusters that already own a plainly truncated Service keep it. The operator now refuses a same-named Service controlled by another resource, gateway certificate DNS names follow the actual Service name, and `kubectl documentdb status` finds the Service by its owning DocumentDB instead of a name substring.
 - Quote product-defined extension and replication role names in lifecycle SQL, and use a product-independent ImageVolume probe name so display names such as `Cosmos DB` do not bypass capability checks.
 
 ### Major Features

@@ -25,10 +25,16 @@ func TestGatewayServiceName(t *testing.T) {
 			"documentdb-service-my-dd",
 		},
 		{
-			"truncated",
-			&previewv1.DocumentDB{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("x", 80)}},
-			// 19 (prefix) + 44 xs = 63
+			"exactly 63",
+			&previewv1.DocumentDB{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("x", 44)}},
+			// 19 (prefix) + 44 xs = 63: unchanged
 			"documentdb-service-" + strings.Repeat("x", 44),
+		},
+		{
+			// Same vector as the operator's TestGatewayServiceNameHashesOnlyLongNames.
+			"hashed",
+			&previewv1.DocumentDB{ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 44) + "-east"}},
+			"documentdb-service-" + strings.Repeat("a", 35) + "-2f5a7991",
 		},
 	}
 	for _, tc := range cases {

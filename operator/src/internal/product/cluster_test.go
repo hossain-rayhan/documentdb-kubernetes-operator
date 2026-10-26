@@ -34,14 +34,44 @@ func TestDocumentDBNamingMatchesWireContract(t *testing.T) {
 	}
 }
 
-func TestServiceNameTruncationKeepsValidDNSLabel(t *testing.T) {
-	n := NamingProfile{ServicePrefix: "cosmos-gateway-"}
-	got := n.ServiceName(strings.Repeat("a", 47) + "-a")
-	if errs := validation.IsDNS1035Label(got); len(errs) != 0 {
-		t.Fatalf("truncating a valid cluster name produced invalid Service name %q: %v", got, errs)
-	}
-	if want := n.ServicePrefix + strings.Repeat("a", 47); got != want {
-		t.Fatalf("ServiceName = %q, want %q", got, want)
+func TestServiceNameKeepsLongClusterNamesDistinct(t *testing.T) {
+	for _, n := range []NamingProfile{DocumentDBProfile().Naming, {ServicePrefix: "cosmos-gateway-"}} {
+		short := n.ServiceName("db")
+		if short != n.ServicePrefix+"db" {
+			t.Fatalf("short names must be unchanged, got %q", short)
+		}
+		if _, ok := n.LegacyServiceName("db"); ok {
+			t.Fatal("a name that fits has no legacy form")
+		}
+		fits := strings.Repeat("f", 63-len(n.ServicePrefix))
+		if got := n.ServiceName(fits); got != n.ServicePrefix+fits {
+			t.Fatalf("a 63-character name must be unchanged, got %q", got)
+		}
+
+		// The names differ only after the 63-character cut, and the cut
+		// lands on a hyphen.
+		base := strings.Repeat("a", 63-len(n.ServicePrefix)-1)
+		east, west := n.ServiceName(base+"-east"), n.ServiceName(base+"-west")
+		if east == west {
+			t.Fatalf("distinct clusters share Service %q", east)
+		}
+		for _, got := range []string{east, west} {
+			if errs := validation.IsDNS1035Label(got); len(errs) != 0 {
+				t.Fatalf("invalid Service name %q: %v", got, errs)
+			}
+			if !strings.HasPrefix(got, n.ServicePrefix) {
+				t.Fatalf("Service name %q lost prefix %q", got, n.ServicePrefix)
+			}
+		}
+		if again := n.ServiceName(base + "-east"); again != east {
+			t.Fatalf("Service name is not stable: %q vs %q", east, again)
+		}
+		if _, ok := n.LegacyServiceName(base + "-east"); ok {
+			t.Fatal("plain truncation ending in a hyphen was never a valid Service name")
+		}
+		if legacy, ok := n.LegacyServiceName(base + "x-east"); !ok || legacy != (n.ServicePrefix+base+"x") {
+			t.Fatalf("unexpected legacy name %q, %v", legacy, ok)
+		}
 	}
 }
 

@@ -1023,8 +1023,8 @@ func TestBuildGatewayService_ProductNeutral(t *testing.T) {
 }
 
 // TestUpsertServiceConvergesPorts updates an existing gateway Service to a new
-// gateway port, keeping server-assigned and unrelated fields, and leaves a
-// Service controlled by another owner untouched.
+// gateway port, keeping server-assigned and unrelated fields, and refuses a
+// Service controlled by another owner without rewriting it.
 func TestUpsertServiceConvergesPorts(t *testing.T) {
 	ctx := context.Background()
 	opts := GatewayServiceOptions{
@@ -1066,13 +1066,40 @@ func TestUpsertServiceConvergesPorts(t *testing.T) {
 
 	foreignOpts := opts
 	foreignOpts.Name = "foreign"
-	if _, err := UpsertService(ctx, c, BuildGatewayService(foreignOpts)); err != nil {
-		t.Fatal(err)
+	if svc, err := UpsertService(ctx, c, BuildGatewayService(foreignOpts)); err == nil || svc != nil ||
+		!strings.Contains(err.Error(), "other-uid") {
+		t.Fatalf("expected a foreign-controller error and no Service, got %v, %v", svc, err)
 	}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(foreign), got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Spec.Ports[0].Port != 10260 {
 		t.Errorf("a Service controlled by another owner was rewritten: %+v", got.Spec.Ports)
+	}
+
+	unowned := existing.DeepCopy()
+	unowned.Name, unowned.OwnerReferences, unowned.ResourceVersion = "unowned", nil, ""
+	if err := c.Create(ctx, unowned); err != nil {
+		t.Fatal(err)
+	}
+	unownedOpts := opts
+	unownedOpts.Name = "unowned"
+	if _, err := UpsertService(ctx, c, BuildGatewayService(unownedOpts)); err != nil {
+		t.Fatalf("a pre-created Service without a controller must still be usable: %v", err)
+	}
+}
+
+func TestGatewayServiceNameHashesOnlyLongNames(t *testing.T) {
+	if got := GatewayServiceName(DOCUMENTDB_SERVICE_PREFIX, "db"); got != "documentdb-service-db" {
+		t.Fatalf("short name changed: %q", got)
+	}
+	long := strings.Repeat("a", 44)
+	east := GatewayServiceName(DOCUMENTDB_SERVICE_PREFIX, long+"-east")
+	// Pin the format: a stable hash must not drift between releases.
+	if want := DOCUMENTDB_SERVICE_PREFIX + strings.Repeat("a", 35) + "-2f5a7991"; east != want {
+		t.Fatalf("GatewayServiceName = %q, want %q", east, want)
+	}
+	if east == GatewayServiceName(DOCUMENTDB_SERVICE_PREFIX, long+"-west") {
+		t.Fatal("names differing past the cut must not share a Service")
 	}
 }

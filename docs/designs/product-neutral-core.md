@@ -143,11 +143,18 @@ identity. The shared injector binary advertises
 and binary with its own gateway parameters. Merely changing the profile's
 plugin name does not rename the plugin server.
 
-Gateway certificate DNS names use the same `NamingProfile.ServiceName` helper
-as the gateway Service, including its 63-character truncation and removal of
-trailing hyphens at the truncation boundary. Truncation preserves the legacy
-naming convention, not uniqueness: product CRD name validation should reserve
-room for the Service prefix to avoid collisions between truncated names.
+Gateway certificate DNS names use the same name as the gateway Service.
+`NamingProfile.ServiceName` returns `ServicePrefix + name` when it fits the
+63-character limit. Otherwise it keeps the first 54 characters, trims a
+trailing hyphen, and appends `-` plus the 8-hex-digit FNV-32a hash of the
+custom resource name, so names that differ only past the cut still get
+distinct Services. Keep `ServicePrefix` under 55 characters so shortened names
+retain it and the Service watch predicate still matches. Earlier releases
+plainly truncated long names; a cluster that already controls such a Service
+keeps using it (and its certificate DNS names) so its endpoint does not change.
+`UpsertService` refuses a same-named Service controlled by another owner
+instead of returning it, so a cluster never publishes another cluster's
+endpoint.
 
 ## Wire contracts kept on purpose
 

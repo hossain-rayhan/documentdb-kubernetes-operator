@@ -6,6 +6,7 @@ package util
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"strconv"
 	"strings"
@@ -30,13 +31,8 @@ import (
 
 // GetDocumentDBServiceDefinition returns the LoadBalancer Service definition for a given DocumentDB instance
 func GetDocumentDBServiceDefinition(documentdb *dbpreview.DocumentDB, replicationContext *ReplicationContext, namespace string, serviceType corev1.ServiceType) *corev1.Service {
-	// Ensure service name doesn't exceed 63 characters (Kubernetes limit)
-	serviceName := DOCUMENTDB_SERVICE_PREFIX + documentdb.Name
-	if len(serviceName) > 63 {
-		serviceName = serviceName[:63]
-	}
 	return BuildGatewayService(GatewayServiceOptions{
-		Name:            serviceName,
+		Name:            GatewayServiceName(DOCUMENTDB_SERVICE_PREFIX, documentdb.Name),
 		Namespace:       namespace,
 		ClusterName:     documentdb.Name,
 		OwnerAPIVersion: documentdb.APIVersion,
@@ -47,6 +43,40 @@ func GetDocumentDBServiceDefinition(documentdb *dbpreview.DocumentDB, replicatio
 		Environment:     replicationContext.Environment,
 		ServiceType:     serviceType,
 	})
+}
+
+// maxServiceNameLength is the Kubernetes DNS-1035 label limit for Service names.
+const maxServiceNameLength = 63
+
+// GatewayServiceName returns prefix+clusterName when it fits the 63-character
+// Service name limit. A longer name keeps as much of that readable prefix as
+// fits and ends in a hash of clusterName, so cluster names that differ only
+// past the cut still get distinct Services.
+func GatewayServiceName(prefix, clusterName string) string {
+	name := prefix + clusterName
+	if len(name) <= maxServiceNameLength {
+		return name
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(clusterName))
+	suffix := fmt.Sprintf("-%08x", h.Sum32())
+	return strings.TrimRight(name[:maxServiceNameLength-len(suffix)], "-") + suffix
+}
+
+// LegacyGatewayServiceName returns the plainly truncated Service name that
+// releases before GatewayServiceName gave clusters whose prefixed name exceeded
+// 63 characters. It reports false when no such Service could exist: the name
+// fits, or truncation leaves an invalid trailing hyphen.
+func LegacyGatewayServiceName(prefix, clusterName string) (string, bool) {
+	name := prefix + clusterName
+	if len(name) <= maxServiceNameLength {
+		return "", false
+	}
+	name = name[:maxServiceNameLength]
+	if strings.HasSuffix(name, "-") {
+		return "", false
+	}
+	return name, true
 }
 
 // GatewayServiceOptions are the product-neutral inputs of the gateway Service.
@@ -187,7 +217,9 @@ func EnsureServiceIP(ctx context.Context, service *corev1.Service) (string, erro
 // An existing Service controlled by the desired Service's controller owner
 // has its ports converged to the desired ports (for example after a gateway
 // port change); server-assigned fields such as ClusterIP(s) and NodePorts and
-// all other spec and metadata fields are preserved.
+// all other spec and metadata fields are preserved. A same-named Service
+// controlled by a different owner is left untouched and reported as an error,
+// so a caller never adopts and publishes another cluster's endpoint.
 func UpsertService(ctx context.Context, c client.Client, service *corev1.Service) (*corev1.Service, error) {
 	log := log.FromContext(ctx)
 	foundService := &corev1.Service{}
@@ -203,10 +235,16 @@ func UpsertService(ctx context.Context, c client.Client, service *corev1.Service
 			if err := c.Get(ctx, types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, foundService); err != nil {
 				return nil, err
 			}
+			if err := checkServiceController(foundService, service); err != nil {
+				return nil, err
+			}
 		} else {
 			return nil, err
 		}
 	} else {
+		if err := checkServiceController(foundService, service); err != nil {
+			return nil, err
+		}
 		if sameController(foundService, service) {
 			foundService.Spec.Ports = convergeServicePorts(foundService.Spec.Ports, service.Spec.Ports)
 		}
@@ -215,6 +253,19 @@ func UpsertService(ctx context.Context, c client.Client, service *corev1.Service
 		}
 	}
 	return foundService, nil
+}
+
+// checkServiceController returns an error when found is controlled by an owner
+// other than desired's controller owner. A Service with no controller is
+// accepted, as before, so a pre-created Service keeps working.
+func checkServiceController(found, desired *corev1.Service) error {
+	owner := metav1.GetControllerOf(desired)
+	current := metav1.GetControllerOf(found)
+	if owner == nil || current == nil || current.UID == owner.UID {
+		return nil
+	}
+	return fmt.Errorf("service %s/%s is controlled by %s %q (uid %s), not %s %q (uid %s)",
+		found.Namespace, found.Name, current.Kind, current.Name, current.UID, owner.Kind, owner.Name, owner.UID)
 }
 
 // sameController reports whether found is controlled by desired's controller

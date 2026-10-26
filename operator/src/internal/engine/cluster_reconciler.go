@@ -162,9 +162,15 @@ func (r *ClusterReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) 
 			serviceType = corev1.ServiceTypeLoadBalancer // Public LoadBalancer service
 		}
 
+		serviceName, err := gatewayServiceName(ctx, r.Client, p.Naming, obj)
+		if err != nil {
+			logger.Error(err, "Failed to resolve "+p.Name+" Service name; Requeuing.")
+			return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
+		}
+
 		apiVersion, kind := obj.GetObjectKind().GroupVersionKind().ToAPIVersionAndKind()
 		svc := util.BuildGatewayService(util.GatewayServiceOptions{
-			Name:            p.Naming.ServiceName(obj.GetName()),
+			Name:            serviceName,
 			Namespace:       req.Namespace,
 			ClusterName:     obj.GetName(),
 			OwnerAPIVersion: apiVersion,

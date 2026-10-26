@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -177,5 +178,35 @@ func TestStatusRunRendersClusterTable(t *testing.T) {
 		if !strings.Contains(output, check.substring) {
 			t.Fatalf("expected output to contain %s (%q), got: %s", check.description, check.substring, output)
 		}
+	}
+}
+
+func TestFindDocumentDBServiceEndpointMatchesOwnerNotSubstring(t *testing.T) {
+	const namespace = "ns"
+	controlled := func(name, owner, ip string) *corev1.Service {
+		return &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "documentdb.io/preview", Kind: "DocumentDB", Name: owner,
+					UID: types.UID("uid-" + owner), Controller: &[]bool{true}[0],
+				}},
+			},
+			Spec: corev1.ServiceSpec{ClusterIP: ip},
+		}
+	}
+	long := strings.Repeat("a", 44) + "-east"
+	client := kubefake.NewSimpleClientset(
+		// Another cluster whose name contains "db"; it must not be reported for "db".
+		controlled(documentdbServicePrefix+"db2", "db2", "10.0.0.9"),
+		// The operator shortened this long name with a hash suffix.
+		controlled(documentdbServicePrefix+strings.Repeat("a", 35)+"-2f5a7991", long, "10.0.0.5"),
+	)
+
+	if got, err := findDocumentDBServiceEndpoint(context.Background(), client, namespace, "member", long); err != nil || got != "10.0.0.5" {
+		t.Fatalf("long name: got %q, %v; want the owned hashed Service", got, err)
+	}
+	if got, err := findDocumentDBServiceEndpoint(context.Background(), client, namespace, "member", "db"); err == nil {
+		t.Fatalf("expected no endpoint for db, got another cluster's %q", got)
 	}
 }
