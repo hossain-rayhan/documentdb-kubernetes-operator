@@ -23,7 +23,7 @@ type CertificateReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=documentdb.io,resources=dbs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=documentdb.io,resources=dbs,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=documentdb.io,resources=dbs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates;issuers,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates/status;issuers/status,verbs=get

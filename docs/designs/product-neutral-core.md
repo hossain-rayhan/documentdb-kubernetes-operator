@@ -150,11 +150,25 @@ trailing hyphen, and appends `-` plus the 8-hex-digit FNV-32a hash of the
 custom resource name, so names that differ only past the cut still get
 distinct Services. Keep `ServicePrefix` under 55 characters so shortened names
 retain it and the Service watch predicate still matches. Earlier releases
-plainly truncated long names; a cluster that already controls such a Service
-keeps using it (and its certificate DNS names) so its endpoint does not change.
-`UpsertService` refuses a same-named Service controlled by another owner
-instead of returning it, so a cluster never publishes another cluster's
-endpoint.
+plainly truncated long names. On the first reconcile of a long-name cluster,
+the operator keeps that legacy name if the cluster still controls a Service or
+managed gateway Certificate using it, and otherwise uses the hashed name. It
+records the choice in the `<Domain>/gateway-service-name` annotation
+(`NamingProfile.ServiceNameAnnotation`) on the custom resource and uses it from
+then on, so deleting and recreating the Service never changes the hostname
+that clients and certificate DNS names rely on. The annotation is ignored and
+rewritten unless it holds one of those two names. The operator therefore needs
+`patch` on its custom resource. When the chosen name changes (for example, an
+upgraded cluster whose legacy name another cluster's Service holds), the
+operator adds the missing Service DNS names to its existing managed gateway
+Certificate (self-signed and cert-manager modes) and keeps the names already
+there, so clients using either hostname keep valid TLS. This requires `patch`
+on `certificates.cert-manager.io`. `UpsertService` refuses a same-named Service
+controlled by another owner instead of returning it, so a cluster never
+publishes another cluster's endpoint. Rolling the operator back to a release
+that plainly truncates names is not supported for clusters whose prefixed name
+exceeds 63 characters: that release would move them back to the truncated
+Service name.
 
 ## Wire contracts kept on purpose
 

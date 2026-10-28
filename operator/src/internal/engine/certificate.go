@@ -5,6 +5,7 @@ package engine
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -237,9 +238,12 @@ func (r *CertificateReconciler[T]) ensureCertManagerManagedCert(ctx context.Cont
 		}
 		return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
 	}
+	if res, done, err := r.ensureServiceDNSNames(ctx, obj, cert, baseDNS); done {
+		return res, err
+	}
 
 	for _, cond := range cert.Status.Conditions {
-		if cond.Type == cmapi.CertificateConditionReady && cond.Status == cmmeta.ConditionTrue {
+		if certificateReady(cert, cond) {
 			if !r.Adapter.Status(obj).TLS.Ready {
 				if err := r.updateTLSStatus(ctx, obj, func(status *dbpreview.TLSStatus) {
 					status.Ready = true
@@ -329,9 +333,12 @@ func (r *CertificateReconciler[T]) ensureSelfSignedCert(ctx context.Context, obj
 		}
 		return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
 	}
+	if res, done, err := r.ensureServiceDNSNames(ctx, obj, cert, dnsNames); done {
+		return res, err
+	}
 
 	for _, cond := range cert.Status.Conditions {
-		if cond.Type == cmapi.CertificateConditionReady && cond.Status == cmmeta.ConditionTrue {
+		if certificateReady(cert, cond) {
 			if !r.Adapter.Status(obj).TLS.Ready {
 				if err := r.updateTLSStatus(ctx, obj, func(status *dbpreview.TLSStatus) {
 					status.Ready = true
@@ -355,6 +362,62 @@ func (r *CertificateReconciler[T]) ensureSelfSignedCert(ctx context.Context, obj
 	return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
 }
 
+// ensureServiceDNSNames adds to an existing managed Certificate any gateway
+// Service DNS name it lacks, for example after the Service name changes. It
+// only adds names, so hostnames clients already use stay valid. A Certificate
+// controlled by another resource is neither modified nor used; one with no
+// controller is used as before. done reports that the caller should return
+// with the given result. Readiness checks require a Ready condition observed
+// for the Certificate's current generation, so the added names are issued
+// before TLS is reported ready again.
+func (r *CertificateReconciler[T]) ensureServiceDNSNames(ctx context.Context, obj T, cert *cmapi.Certificate, serviceDNS []string) (ctrl.Result, bool, error) {
+	if ref := metav1.GetControllerOf(cert); ref != nil && ref.UID != obj.GetUID() {
+		// Left by a deleted custom resource of the same name; wait for
+		// garbage collection instead of using its status or Secret.
+		if err := r.updateTLSStatus(ctx, obj, func(status *dbpreview.TLSStatus) {
+			status.Ready = false
+			status.Message = "Waiting for a gateway certificate owned by another resource to be removed"
+		}); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{RequeueAfter: RequeueAfterShort}, true, nil
+	}
+	if !controlledBy(cert, obj) {
+		return ctrl.Result{}, false, nil
+	}
+	var missing []string
+	for _, n := range serviceDNS {
+		if !slices.Contains(cert.Spec.DNSNames, n) {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) == 0 {
+		return ctrl.Result{}, false, nil
+	}
+	before := cert.DeepCopy()
+	cert.Spec.DNSNames = append(cert.Spec.DNSNames, missing...)
+	if err := r.Patch(ctx, cert, client.MergeFrom(before)); err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if err := r.updateTLSStatus(ctx, obj, func(status *dbpreview.TLSStatus) {
+		status.Ready = false
+		status.SecretName = cert.Spec.SecretName
+		status.Message = "Updating gateway certificate DNS names"
+	}); err != nil {
+		return ctrl.Result{}, true, err
+	}
+	return ctrl.Result{RequeueAfter: RequeueAfterShort}, true, nil
+}
+
+// certificateReady reports whether cond is a Ready=True condition for cert's
+// current generation, so a spec change (such as added DNS names) is issued
+// before TLS is reported ready. A condition without an observed generation is
+// accepted as before.
+func certificateReady(cert *cmapi.Certificate, cond cmapi.CertificateCondition) bool {
+	return cond.Type == cmapi.CertificateConditionReady && cond.Status == cmmeta.ConditionTrue &&
+		(cond.ObservedGeneration == 0 || cond.ObservedGeneration >= cert.Generation)
+}
+
 func (r *CertificateReconciler[T]) updateTLSStatus(ctx context.Context, obj T, mutate func(*dbpreview.TLSStatus)) error {
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -372,6 +435,10 @@ func (r *CertificateReconciler[T]) updateTLSStatus(ctx context.Context, obj T, m
 			return err
 		}
 		r.Adapter.SetStatus(obj, r.Adapter.Status(current))
+		// Keep obj current so later writes in this reconcile, such as the
+		// optimistic-lock patch that records the gateway Service name, do not
+		// conflict with this status update.
+		obj.SetResourceVersion(current.GetResourceVersion())
 		return nil
 	})
 }

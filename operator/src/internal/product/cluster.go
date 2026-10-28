@@ -48,6 +48,11 @@ func (n NamingProfile) SchemaVersionAnnotation() string { return n.Domain + "/sc
 // Finalizer is the custom resource finalizer used to warn about retained PVs.
 func (n NamingProfile) Finalizer() string { return n.Domain + "/pv-retention-finalizer" }
 
+// ServiceNameAnnotation records, on a custom resource whose prefixed name
+// exceeds 63 characters, the gateway Service name the operator chose, so the
+// name stays fixed when the Service is deleted and recreated.
+func (n NamingProfile) ServiceNameAnnotation() string { return n.Domain + "/gateway-service-name" }
+
 // ServiceName is the gateway Service name for a custom resource:
 // ServicePrefix+clusterName, or, when that exceeds the 63-character Kubernetes
 // name limit, a truncated form ending in a hash of clusterName so distinct

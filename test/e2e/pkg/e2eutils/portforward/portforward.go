@@ -41,9 +41,14 @@ const GatewayPort = 10260
 // ServiceNamePrefix mirrors DOCUMENTDB_SERVICE_PREFIX from the operator.
 // The Service name is ServiceNamePrefix + dd.Name; when that exceeds 63
 // characters the operator keeps the first 54 and appends "-" plus the
-// FNV-32a hash of dd.Name (see utils.GatewayServiceName). E2E clusters are
-// created fresh, so the operator's legacy plainly truncated name never applies.
+// FNV-32a hash of dd.Name (see utils.GatewayServiceName), unless it recorded
+// another valid choice (the plainly truncated name of an upgraded cluster) in
+// ServiceNameAnnotation.
 const ServiceNamePrefix = "documentdb-service-"
+
+// ServiceNameAnnotation mirrors NamingProfile.ServiceNameAnnotation for
+// DocumentDB.
+const ServiceNameAnnotation = "documentdb.io/gateway-service-name"
 
 // GatewayServiceName returns the Service name the operator creates for
 // the given DocumentDB CR.
@@ -58,7 +63,11 @@ func GatewayServiceName(dd *previewv1.DocumentDB) string {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(dd.Name))
 	suffix := fmt.Sprintf("-%08x", h.Sum32())
-	return strings.TrimRight(name[:63-len(suffix)], "-") + suffix
+	hashed := strings.TrimRight(name[:63-len(suffix)], "-") + suffix
+	if recorded := dd.Annotations[ServiceNameAnnotation]; recorded == name[:63] && !strings.HasSuffix(recorded, "-") {
+		return recorded
+	}
+	return hashed
 }
 
 // OpenWithErr establishes a port-forward from localPort on the caller's
