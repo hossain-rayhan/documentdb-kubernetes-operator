@@ -28,6 +28,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -128,6 +129,18 @@ func (r *ClusterReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) 
 		logger.Error(err, "Failed to get "+p.Name+" resource")
 		return ctrl.Result{}, err
 	}
+	// Direct (non-cached) clients can return typed resources without TypeMeta.
+	// Resolve it before the adapter or Service builder constructs owner refs.
+	if gvk := obj.GetObjectKind().GroupVersionKind(); gvk.Kind == "" || gvk.Version == "" {
+		if r.Scheme == nil {
+			return ctrl.Result{}, fmt.Errorf("Scheme must be configured to resolve the cluster resource kind")
+		}
+		gvk, err := apiutil.GVKForObject(obj, r.Scheme)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		obj.GetObjectKind().SetGroupVersionKind(gvk)
+	}
 
 	// Handle finalizer lifecycle (add on create, remove on delete)
 	if done, result, err := r.ReconcileFinalizer(ctx, obj); done || err != nil {
@@ -167,6 +180,14 @@ func (r *ClusterReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) 
 			logger.Error(err, "Failed to resolve "+p.Name+" Service name; Requeuing.")
 			return ctrl.Result{RequeueAfter: RequeueAfterShort}, nil
 		}
+		endpointEnabled := replicationContext.EndpointEnabled()
+		if endpointEnabled && len(p.Naming.ServicePrefix+obj.GetName()) > 63 &&
+			(spec.GatewayTLS == nil || spec.GatewayTLS.Mode != "Provided") {
+			endpointEnabled, err = gatewayServiceTLSReady(ctx, r.Client, obj, serviceName)
+			if err != nil {
+				return ctrl.Result{RequeueAfter: RequeueAfterShort}, err
+			}
+		}
 
 		apiVersion, kind := obj.GetObjectKind().GroupVersionKind().ToAPIVersionAndKind()
 		svc := util.BuildGatewayService(util.GatewayServiceOptions{
@@ -177,7 +198,7 @@ func (r *ClusterReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) 
 			OwnerKind:       kind,
 			OwnerUID:        obj.GetUID(),
 			Port:            GatewayPort(p),
-			EndpointEnabled: replicationContext.EndpointEnabled(),
+			EndpointEnabled: endpointEnabled,
 			Environment:     replicationContext.Environment,
 			ServiceType:     serviceType,
 		})

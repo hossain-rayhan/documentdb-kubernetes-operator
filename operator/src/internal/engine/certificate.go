@@ -396,7 +396,7 @@ func (r *CertificateReconciler[T]) ensureServiceDNSNames(ctx context.Context, ob
 	}
 	before := cert.DeepCopy()
 	cert.Spec.DNSNames = append(cert.Spec.DNSNames, missing...)
-	if err := r.Patch(ctx, cert, client.MergeFrom(before)); err != nil {
+	if err := r.Patch(ctx, cert, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, true, err
 	}
 	if err := r.updateTLSStatus(ctx, obj, func(status *dbpreview.TLSStatus) {
@@ -411,11 +411,10 @@ func (r *CertificateReconciler[T]) ensureServiceDNSNames(ctx context.Context, ob
 
 // certificateReady reports whether cond is a Ready=True condition for cert's
 // current generation, so a spec change (such as added DNS names) is issued
-// before TLS is reported ready. A condition without an observed generation is
-// accepted as before.
+// before TLS is reported ready.
 func certificateReady(cert *cmapi.Certificate, cond cmapi.CertificateCondition) bool {
 	return cond.Type == cmapi.CertificateConditionReady && cond.Status == cmmeta.ConditionTrue &&
-		(cond.ObservedGeneration == 0 || cond.ObservedGeneration >= cert.Generation)
+		cond.ObservedGeneration >= cert.Generation
 }
 
 func (r *CertificateReconciler[T]) updateTLSStatus(ctx context.Context, obj T, mutate func(*dbpreview.TLSStatus)) error {
@@ -435,9 +434,10 @@ func (r *CertificateReconciler[T]) updateTLSStatus(ctx context.Context, obj T, m
 			return err
 		}
 		r.Adapter.SetStatus(obj, r.Adapter.Status(current))
-		// Keep obj current so later writes in this reconcile, such as the
-		// optimistic-lock patch that records the gateway Service name, do not
-		// conflict with this status update.
+		// The version and annotations must come from the same snapshot:
+		// advancing only the version would let a later naming patch overwrite
+		// a choice recorded by another reconciler.
+		obj.SetAnnotations(current.GetAnnotations())
 		obj.SetResourceVersion(current.GetResourceVersion())
 		return nil
 	})

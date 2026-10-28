@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -36,6 +37,33 @@ type clusterReconciler = ClusterReconciler[*dbpreview.DocumentDB]
 var clusterKey = ctrl.Request{NamespacedName: types.NamespacedName{Name: "db", Namespace: testNamespace}}
 
 var finalizer = product.DocumentDBProfile().Naming.Finalizer()
+
+func TestClusterReconcileResolvesTypeMetaForDirectClients(t *testing.T) {
+	s := newTestScheme(t)
+	db := reconcilableCluster()
+	db.Spec.ExposeViaService.ServiceType = ""
+	c := newFakeClient(t, s, &interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			err := c.Get(ctx, key, obj, opts...)
+			if _, ok := obj.(*dbpreview.DocumentDB); ok {
+				obj.GetObjectKind().SetGroupVersionKind(schema.GroupVersionKind{})
+			}
+			return err
+		},
+	}, db)
+	r, _ := newClusterReconciler(c, s, &sqlRecorder{})
+	if _, err := r.Reconcile(context.Background(), clusterKey); err != nil {
+		t.Fatal(err)
+	}
+	cluster := &cnpgv1.Cluster{}
+	if err := c.Get(context.Background(), clusterKey.NamespacedName, cluster); err != nil {
+		t.Fatal(err)
+	}
+	owner := metav1.GetControllerOf(cluster)
+	if owner == nil || owner.APIVersion != "documentdb.io/preview" || owner.Kind != "DocumentDB" || owner.UID != db.UID {
+		t.Fatalf("direct-client resource lost its owner identity: %+v", owner)
+	}
+}
 
 const extensionVersionsUpToDate = " default_version | installed_version\n" +
 	"-----------------+-------------------\n" +

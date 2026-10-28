@@ -9,6 +9,7 @@ import (
 	_ "embed"
 	"fmt"
 	"sort"
+	"strings"
 	"text/template"
 
 	"gopkg.in/yaml.v3"
@@ -31,6 +32,11 @@ type staticConfigData struct {
 
 // renderStaticConfig renders static.yaml from base_config.yaml.
 func renderStaticConfig(data staticConfigData) (string, error) {
+	metricName, err := yaml.Marshal(data.HealthMetricName)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode health metric name: %w", err)
+	}
+	data.HealthMetricName = strings.TrimSuffix(string(metricName), "\n")
 	var out bytes.Buffer
 	if err := baseConfigTemplate.Execute(&out, data); err != nil {
 		return "", fmt.Errorf("failed to render static OTel config: %w", err)

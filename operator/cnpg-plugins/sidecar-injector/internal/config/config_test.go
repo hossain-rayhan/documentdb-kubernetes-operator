@@ -89,6 +89,7 @@ func TestFromParameters(t *testing.T) {
 			"otelCollectorImage": "otel/opentelemetry-collector-contrib:test",
 			"otelConfigMapName":  "demo-otel-config",
 			"otelConfigHash":     "abc123",
+			"otelPasswordSecret": "monitor-password",
 		}}
 		config, errs := FromParameters(helper)
 		if len(errs) != 0 {
@@ -103,6 +104,9 @@ func TestFromParameters(t *testing.T) {
 		if config.OtelConfigHash != "abc123" {
 			t.Errorf("OtelConfigHash = %q", config.OtelConfigHash)
 		}
+		if config.OtelPasswordSecret != "monitor-password" {
+			t.Errorf("OtelPasswordSecret = %q", config.OtelPasswordSecret)
+		}
 	})
 
 	for _, tt := range []struct {
@@ -110,6 +114,13 @@ func TestFromParameters(t *testing.T) {
 		parameters map[string]string
 		wantErrors int
 	}{
+		{
+			name: "rejects password secret without required parameters",
+			parameters: map[string]string{
+				"otelPasswordSecret": "monitor-password",
+			},
+			wantErrors: 2,
+		},
 		{
 			name: "rejects collector image without config map",
 			parameters: map[string]string{

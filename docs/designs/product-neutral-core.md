@@ -11,10 +11,10 @@ This design separates the CNPG orchestration (rendering the `Cluster`,
 syncing it, PostgreSQL parameters, the resource split, and the extension
 lifecycle) from the DocumentDB product, so a second operator can reuse the same
 code. The reconcilers (cluster, certificate, persistent volume, backup,
-scheduled backup) and the admission rules are generic too. DocumentDB behavior
-is unchanged: golden snapshots of the rendered `Cluster` are byte-identical
-before and after the refactor, and the controller and webhook tests pass
-unmodified.
+scheduled backup) and the admission rules are generic too. Default DocumentDB
+CNPG rendering is preserved by byte-identical golden snapshots. The intentional
+long-name Service, TLS recovery, selector-convergence, and RBAC changes are
+described below.
 
 ## Layers
 
@@ -92,10 +92,18 @@ to 1-59 characters matching `^[a-z0-9]([-a-z0-9_]*[a-z0-9])?$`. SQL quoting does
 not relax that separate constraint. Bootstrap SQL is product-authored SQL and
 is passed through verbatim.
 
+`PostgresProfile.ExtensionVersionFormat` selects the extension's catalog version
+format. Its zero value, `core.ExtensionVersionDocumentDB`, preserves DocumentDB's
+`Major.Minor-Patch` catalog versions and dotted spec/status versions. Products
+whose PostgreSQL extension uses dotted semantic versions set
+`core.ExtensionVersionSemver`; automatic upgrades, explicit targets, comparison,
+events, and schema status then use that format without rewriting it.
+
 The DocumentDB controllers and webhook in `internal/controller` and
 `internal/webhook` are now thin wrappers over these packages. They keep their
-types, method names, and RBAC markers, so `cmd/main.go`, tests, and generated
-manifests are unchanged.
+types, method names, and `cmd/main.go` wiring. CRD schemas are unchanged;
+certificate and custom-resource patch permissions support the recovery
+behavior described below.
 
 The renderer (`cnpg.GetCnpgClusterSpecFromIntent`) only reads the intent. The
 old `GetCnpgClusterSpec`, `MergeParameters`, `ProtectedParameters`,
@@ -134,7 +142,8 @@ them, so existing clusters see no parameter change and no rolling restart.
 `SyncCnpgCluster` adds, updates, and removes these parameters on existing
 clusters and requests a rolling restart when they change. When the gateway
 port changes, the client Service's ports follow it; the Service keeps its
-assigned cluster IPs and node ports. See
+assigned cluster IPs and node ports. Its selector also converges, disabling
+traffic while promotion is pending and restoring it when promotion completes. See
 [the plugin configuration guide](../developer-guides/sidecar-injector-plugin-configuration.md).
 
 The configured plugin name must match the deployed plugin server's advertised
@@ -158,12 +167,21 @@ records the choice in the `<Domain>/gateway-service-name` annotation
 then on, so deleting and recreating the Service never changes the hostname
 that clients and certificate DNS names rely on. The annotation is ignored and
 rewritten unless it holds one of those two names. The operator therefore needs
-`patch` on its custom resource. When the chosen name changes (for example, an
+`patch` on its custom resource. If that annotation is lost, an already-owned
+hashed Service takes precedence over historical certificate SANs when
+reconstructing the name. Naming writes use optimistic locking, and TLS status
+refreshes retain the annotation snapshot corresponding to the resource version.
+When the chosen name changes (for example, an
 upgraded cluster whose legacy name another cluster's Service holds), the
 operator adds the missing Service DNS names to its existing managed gateway
 Certificate (self-signed and cert-manager modes) and keeps the names already
 there, so clients using either hostname keep valid TLS. This requires `patch`
-on `certificates.cert-manager.io`. `UpsertService` refuses a same-named Service
+on `certificates.cert-manager.io`. Certificate patches also use optimistic
+locking: concurrent changes and replacement objects are refetched and their
+ownership rechecked, not overwritten. A long-name Service is held without
+matching endpoints until its existing managed Certificate includes its DNS
+names and is Ready for the current generation. Provided TLS remains the
+product/user's responsibility. `UpsertService` refuses a same-named Service
 controlled by another owner instead of returning it, so a cluster never
 publishes another cluster's endpoint. Rolling the operator back to a release
 that plainly truncates names is not supported for clusters whose prefixed name
@@ -181,6 +199,25 @@ restart pods or break configuration, so they stay as they are:
   `DOCUMENTDB_GATEWAY_MEMORY_FRACTION` and `DOCUMENTDB_IOURING_SECCOMP_PROFILE`).
 - The credential secret keys are `username` and `password`, and the gateway
   TLS secret is mounted at `/tls`.
+
+## Monitoring authentication
+
+The default DocumentDB profile retains its password-disabled `otel_monitor`
+role and existing loopback authentication. A product using password
+authentication instead configures:
+
+```go
+profile.Postgres.MonitoringPasswordSecret = "monitor-password"
+```
+
+Provide that `kubernetes.io/basic-auth` Secret in each cluster namespace, with
+`username: otel_monitor` and a `password` key. CNPG uses it to set the managed
+role password; the optional `otelPasswordSecret` plugin parameter makes the
+collector read `PGPASSWORD` from the same Secret. The core never inserts trust
+rules into the product's `PgHBA`. Changing or removing the Secret reference
+converges the managed role and collector parameters and requests a rollout.
+Metric names are YAML-encoded, including valid names such as `null`, so the
+generated receiver configuration retains a string value.
 
 ## Using the core from another operator
 

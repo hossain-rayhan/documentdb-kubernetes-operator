@@ -80,16 +80,37 @@ type ExtensionSpec struct {
 	LdLibraryPath        []string
 }
 
+// ExtensionVersionFormat selects the PostgreSQL extension version convention.
+type ExtensionVersionFormat uint8
+
+const (
+	// ExtensionVersionDocumentDB uses Major.Minor-Patch in PostgreSQL and
+	// Major.Minor.Patch in the resource spec/status. It is the default.
+	ExtensionVersionDocumentDB ExtensionVersionFormat = iota
+	// ExtensionVersionSemver uses dotted semantic versions in PostgreSQL and
+	// the resource spec/status, without rewriting prerelease identifiers.
+	ExtensionVersionSemver
+)
+
 // PostgresProfile captures the product-wide PostgreSQL contract.
 type PostgresProfile struct {
 	// Extension is the product extension mounted from the extension image.
 	Extension ExtensionSpec
+	// ExtensionVersionFormat controls extension comparison and spec/status
+	// conversion. Its zero value preserves DocumentDB's version convention.
+	ExtensionVersionFormat ExtensionVersionFormat
 	// AdditionalLibraries are added to shared_preload_libraries.
 	AdditionalLibraries []string
 	// BootstrapSQL runs once at initdb, before any user PostInitSQL.
 	BootstrapSQL []string
 	// PgHBA is the host-based authentication configuration.
 	PgHBA []string
+	// MonitoringPasswordSecret optionally names an existing kubernetes.io/basic-auth
+	// Secret in the cluster namespace with username "otel_monitor" and a
+	// "password" key, as required by CNPG managed roles. Products using password
+	// authentication must configure it explicitly; the core never adds trust
+	// rules to PgHBA. Empty preserves the password-disabled default.
+	MonitoringPasswordSecret string
 	// ProtectedParameters are product GUCs the operator always forces, on top
 	// of the core protected set.
 	ProtectedParameters map[string]string

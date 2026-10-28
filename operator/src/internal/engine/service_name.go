@@ -7,11 +7,13 @@ import (
 	"context"
 	"slices"
 
+	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,7 +49,15 @@ func gatewayServiceName(ctx context.Context, c client.Client, naming product.Nam
 	}
 
 	chosen := hashed
-	if hasLegacy {
+	// Reconstruct lost annotations from the actual endpoint before consulting
+	// a certificate, whose add-only SANs may retain both historical names.
+	hashedService := &corev1.Service{}
+	if recorded != legacy {
+		if err := c.Get(ctx, types.NamespacedName{Name: hashed, Namespace: obj.GetNamespace()}, hashedService); err != nil && !apierrors.IsNotFound(err) {
+			return "", err
+		}
+	}
+	if hasLegacy && !controlledBy(hashedService, obj) {
 		available, inUse, err := legacyServiceNameState(ctx, c, obj, legacy)
 		if err != nil {
 			return "", err
@@ -116,4 +126,36 @@ func legacyServiceNameState(ctx context.Context, c client.Reader, obj client.Obj
 func controlledBy(o, owner metav1.Object) bool {
 	ref := metav1.GetControllerOf(o)
 	return ref != nil && ref.UID == owner.GetUID()
+}
+
+// gatewayServiceTLSReady holds a long-name endpoint while its managed
+// certificate is being migrated. Reading unstructured keeps the cluster
+// reconciler usable without registering cert-manager types.
+func gatewayServiceTLSReady(ctx context.Context, c client.Reader, obj client.Object, serviceName string) (bool, error) {
+	raw := &unstructured.Unstructured{}
+	raw.SetGroupVersionKind(certificateGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: obj.GetName() + "-gateway-cert", Namespace: obj.GetNamespace()}, raw); err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	cert := &cmapi.Certificate{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw.Object, cert); err != nil {
+		return false, err
+	}
+	if ref := metav1.GetControllerOf(cert); ref != nil && ref.UID != obj.GetUID() {
+		return false, nil
+	}
+	for _, name := range []string{serviceName, serviceName + "." + obj.GetNamespace(), serviceName + "." + obj.GetNamespace() + ".svc"} {
+		if !slices.Contains(cert.Spec.DNSNames, name) {
+			return false, nil
+		}
+	}
+	for _, condition := range cert.Status.Conditions {
+		if certificateReady(cert, condition) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

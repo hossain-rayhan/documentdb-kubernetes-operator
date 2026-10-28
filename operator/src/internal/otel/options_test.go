@@ -46,6 +46,7 @@ func TestGenerateConfigMapDataHealthMetricName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	explicit, err := GenerateConfigMapDataWithOptions(Options{HealthMetricName: "documentdb.postgres.up"}, "c", "ns", spec)
 	if err != nil {
 		t.Fatal(err)
@@ -79,5 +80,25 @@ func TestGenerateConfigMapDataHealthMetricName(t *testing.T) {
 	}
 	if HashConfigMapData(custom) == HashConfigMapData(def) {
 		t.Fatal("the config hash must change with the health metric name")
+	}
+}
+
+func TestHealthMetricNameYAMLScalar(t *testing.T) {
+	for _, name := range []string{"null", "true", "cosmos.postgres.up", defaultHealthMetricName} {
+		t.Run(name, func(t *testing.T) {
+			data, err := GenerateConfigMapDataWithOptions(Options{HealthMetricName: name}, "c", "ns", &dbpreview.MonitoringSpec{Enabled: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cfg collectorConfig
+			if err := yaml.Unmarshal([]byte(data["static.yaml"]), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			queries := cfg.Receivers["sqlquery"].(map[string]any)["queries"].([]any)
+			metric := queries[0].(map[string]any)["metrics"].([]any)[0].(map[string]any)
+			if got := metric["metric_name"]; got != name {
+				t.Fatalf("metric_name = %#v, want string %q", got, name)
+			}
+		})
 	}
 }

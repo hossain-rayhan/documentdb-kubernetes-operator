@@ -215,8 +215,8 @@ func EnsureServiceIP(ctx context.Context, service *corev1.Service) (string, erro
 
 // UpsertService checks if the Service already exists, and creates it if not.
 // An existing Service controlled by the desired Service's controller owner
-// has its ports converged to the desired ports (for example after a gateway
-// port change); server-assigned fields such as ClusterIP(s) and NodePorts and
+// has its ports and selector converged (for example after a gateway port
+// change or a pending promotion); server-assigned fields such as ClusterIP(s) and NodePorts and
 // all other spec and metadata fields are preserved. A same-named Service
 // controlled by a different owner is left untouched and reported as an error,
 // so a caller never adopts and publishes another cluster's endpoint.
@@ -247,6 +247,7 @@ func UpsertService(ctx context.Context, c client.Client, service *corev1.Service
 		}
 		if sameController(foundService, service) {
 			foundService.Spec.Ports = convergeServicePorts(foundService.Spec.Ports, service.Spec.Ports)
+			foundService.Spec.Selector = service.Spec.Selector
 		}
 		if err := c.Update(ctx, foundService); err != nil {
 			return nil, err

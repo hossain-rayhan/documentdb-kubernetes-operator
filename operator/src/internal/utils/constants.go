@@ -115,6 +115,7 @@ const (
 	PLUGIN_PARAM_OTEL_COLLECTOR_IMAGE   = "otelCollectorImage"
 	PLUGIN_PARAM_OTEL_CONFIG_MAP_NAME   = "otelConfigMapName"
 	PLUGIN_PARAM_OTEL_CONFIG_HASH       = "otelConfigHash"
+	PLUGIN_PARAM_OTEL_PASSWORD_SECRET   = "otelPasswordSecret"
 	PLUGIN_PARAM_PROMETHEUS_PORT        = "prometheusPort"
 	PLUGIN_PARAM_GATEWAY_MEMORY_REQUEST = "gatewayMemoryRequest"
 	PLUGIN_PARAM_GATEWAY_MEMORY_LIMIT   = "gatewayMemoryLimit"

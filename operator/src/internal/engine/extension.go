@@ -12,9 +12,11 @@ import (
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/version"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	cnpg "github.com/documentdb/documentdb-operator/internal/cnpg"
+	"github.com/documentdb/documentdb-operator/internal/product"
 	util "github.com/documentdb/documentdb-operator/internal/utils"
 )
 
@@ -50,6 +52,45 @@ func ParseExtensionVersions(output string) (defaultVersion, installedVersion str
 
 func (r *ClusterReconciler[T]) extensionName() string {
 	return r.profile().Postgres.Extension.Name
+}
+
+func (r *ClusterReconciler[T]) extensionVersionToSemver(v string) string {
+	if r.profile().Postgres.ExtensionVersionFormat == product.ExtensionVersionSemver {
+		return v
+	}
+	return util.ExtensionVersionToSemver(v)
+}
+
+func (r *ClusterReconciler[T]) semverToExtensionVersion(v string) string {
+	if r.profile().Postgres.ExtensionVersionFormat == product.ExtensionVersionSemver {
+		return v
+	}
+	return util.SemverToExtensionVersion(v)
+}
+
+func (r *ClusterReconciler[T]) compareExtensionVersions(a, b string) (int, error) {
+	switch format := r.profile().Postgres.ExtensionVersionFormat; format {
+	case product.ExtensionVersionDocumentDB:
+		return util.CompareExtensionVersions(a, b)
+	case product.ExtensionVersionSemver:
+		first, err := version.ParseSemantic(a)
+		if err != nil {
+			return 0, err
+		}
+		second, err := version.ParseSemantic(b)
+		if err != nil {
+			return 0, err
+		}
+		if first.LessThan(second) {
+			return -1, nil
+		}
+		if second.LessThan(first) {
+			return 1, nil
+		}
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("unsupported extension version format %d", format)
+	}
 }
 
 func (r *ClusterReconciler[T]) refetch(ctx context.Context, obj T) error {
@@ -101,8 +142,8 @@ func (r *ClusterReconciler[T]) HandleExtensionUpgrade(ctx context.Context, curre
 	}
 
 	// Update schema version in status (even if no upgrade needed)
-	// Convert from pg_available_extensions format ("0.110-0") to semver ("0.110.0")
-	installedSemver := util.ExtensionVersionToSemver(installedVersion)
+	// Normalize the PostgreSQL version according to the product's convention.
+	installedSemver := r.extensionVersionToSemver(installedVersion)
 	if r.Adapter.Status(obj).SchemaVersion != installedSemver {
 		// Re-fetch to get latest resourceVersion before status update
 		if err := r.refetch(ctx, obj); err != nil {
@@ -124,7 +165,7 @@ func (r *ClusterReconciler[T]) HandleExtensionUpgrade(ctx context.Context, curre
 	// Rollback detection — check if the new binary is older than the installed schema.
 	// Note: Image rollback below installed schema version is also blocked by the validating
 	// webhook at admission time. This is a defense-in-depth guard.
-	cmp, err := util.CompareExtensionVersions(defaultVersion, installedVersion)
+	cmp, err := r.compareExtensionVersions(defaultVersion, installedVersion)
 	if err != nil {
 		logger.Error(err, "Failed to compare extension versions, skipping ALTER EXTENSION as a safety measure",
 			"defaultVersion", defaultVersion,
@@ -171,7 +212,7 @@ func (r *ClusterReconciler[T]) HandleExtensionUpgrade(ctx context.Context, curre
 	if err := r.refetch(ctx, obj); err != nil {
 		return fmt.Errorf("failed to refetch %s after schema upgrade: %w", name, err)
 	}
-	r.setSchemaVersion(obj, util.ExtensionVersionToSemver(schemaTarget))
+	r.setSchemaVersion(obj, r.extensionVersionToSemver(schemaTarget))
 	if err := r.Status().Update(ctx, obj); err != nil {
 		logger.Error(err, "Failed to update "+name+" status after schema upgrade")
 		return fmt.Errorf("failed to update %s status after schema upgrade: %w", name, err)
@@ -214,9 +255,9 @@ func (r *ClusterReconciler[T]) DetermineSchemaTarget(
 			msg := fmt.Sprintf(
 				"Schema update available: binary version is %s, schema is at %s. "+
 					"Set spec.schemaVersion to %q or \"auto\" to finalize the upgrade.",
-				util.ExtensionVersionToSemver(binaryVersion),
-				util.ExtensionVersionToSemver(installedVersion),
-				util.ExtensionVersionToSemver(binaryVersion))
+				r.extensionVersionToSemver(binaryVersion),
+				r.extensionVersionToSemver(installedVersion),
+				r.extensionVersionToSemver(binaryVersion))
 			r.Recorder.Event(obj, corev1.EventTypeNormal, "SchemaUpdateAvailable", msg)
 		}
 		return "", ""
@@ -227,12 +268,12 @@ func (r *ClusterReconciler[T]) DetermineSchemaTarget(
 
 	default:
 		// Explicit version: update to that specific version.
-		targetPgVersion := util.SemverToExtensionVersion(specSchemaVersion)
+		targetPgVersion := r.semverToExtensionVersion(specSchemaVersion)
 
 		// Guard: target must not exceed binary version.
 		// Note: schemaVersion <= binary version is enforced by the validating webhook at
 		// admission time. This is a defense-in-depth guard.
-		targetCmp, err := util.CompareExtensionVersions(targetPgVersion, binaryVersion)
+		targetCmp, err := r.compareExtensionVersions(targetPgVersion, binaryVersion)
 		if err != nil {
 			logger.Error(err, "Failed to compare target schema version with binary version",
 				"targetVersion", specSchemaVersion,
@@ -242,12 +283,12 @@ func (r *ClusterReconciler[T]) DetermineSchemaTarget(
 		if targetCmp > 0 {
 			logger.Info("Skipping schema update: schemaVersion exceeds binary version (should have been rejected by webhook)",
 				"schemaVersion", specSchemaVersion,
-				"binaryVersion", util.ExtensionVersionToSemver(binaryVersion))
+				"binaryVersion", r.extensionVersionToSemver(binaryVersion))
 			return "", ""
 		}
 
 		// Check: target must be > installed version (otherwise no-op)
-		installedCmp, err := util.CompareExtensionVersions(targetPgVersion, installedVersion)
+		installedCmp, err := r.compareExtensionVersions(targetPgVersion, installedVersion)
 		if err != nil {
 			logger.Error(err, "Failed to compare target schema version with installed version",
 				"targetVersion", specSchemaVersion,
@@ -261,10 +302,8 @@ func (r *ClusterReconciler[T]) DetermineSchemaTarget(
 			return "", ""
 		}
 
-		// Safety: targetPgVersion is derived from spec.schemaVersion via SemverToExtensionVersion,
-		// which produces a "Major.Minor-Patch" string (e.g., "0.112-0"). The input is validated
-		// by the CRD schema regex pattern and the validating webhook's version parsing, so it
-		// contains only digits, dots, and hyphens — no SQL injection risk.
+		// The target has been parsed under the product's version policy;
+		// ExtensionUpdateSQL also quotes it as a PostgreSQL literal.
 		return targetPgVersion, cnpg.ExtensionUpdateSQL(r.extensionName(), targetPgVersion)
 	}
 }

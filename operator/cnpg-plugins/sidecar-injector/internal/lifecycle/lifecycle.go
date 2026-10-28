@@ -271,7 +271,7 @@ func (impl Implementation) reconcileMetadata(
 			})
 		}
 
-		otelSidecar := newOtelCollectorSidecar(configuration.OtelCollectorImage)
+		otelSidecar := newOtelCollectorSidecar(configuration.OtelCollectorImage, configuration.OtelPasswordSecret)
 		if resources := buildResources(
 			configuration.OTelCPURequest,
 			configuration.OTelCPULimit,
@@ -507,17 +507,14 @@ func gatewaySecurityContext() *corev1.SecurityContext {
 // explicit UID so the upstream collector image keeps its own baked-in non-root
 // user (UID 10001); PSA "restricted" only requires runAsNonRoot, not a fixed
 // UID.
-func newOtelCollectorSidecar(image string) *corev1.Container {
-	return &corev1.Container{
+func newOtelCollectorSidecar(image, passwordSecret string) *corev1.Container {
+	container := &corev1.Container{
 		Name:  otelCollectorContainerName,
 		Image: image,
 		Args: []string{
 			"--config=file:/config/static.yaml",
 			"--config=file:/config/dynamic.yaml",
 		},
-		// PostgreSQL currently uses trust authentication, so injecting a password
-		// would not enforce access control. Use the dedicated password-disabled
-		// identity directly until database authentication is tightened.
 		Env: []corev1.EnvVar{
 			{
 				Name: "POD_NAME",
@@ -541,4 +538,16 @@ func newOtelCollectorSidecar(image string) *corev1.Container {
 		},
 		SecurityContext: hardenedSecurityContext(),
 	}
+	if passwordSecret != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name: "PGPASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: passwordSecret},
+					Key:                  "password",
+				},
+			},
+		})
+	}
+	return container
 }

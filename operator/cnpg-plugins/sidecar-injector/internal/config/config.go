@@ -28,6 +28,7 @@ const (
 	otelCollectorImageParameter         = "otelCollectorImage"
 	otelConfigMapNameParameter          = "otelConfigMapName"
 	otelConfigHashParameter             = "otelConfigHash"
+	otelPasswordSecretParameter         = "otelPasswordSecret"
 	otelMemoryRequestParameter          = "otelMemoryRequest"
 	otelMemoryLimitParameter            = "otelMemoryLimit"
 	otelCPURequestParameter             = "otelCpuRequest"
@@ -66,11 +67,13 @@ type Configuration struct {
 	OtelCollectorImage         string
 	OtelConfigMapName          string
 	OtelConfigHash             string
-	OTelMemoryRequest          string
-	OTelMemoryLimit            string
-	OTelCPURequest             string
-	OTelCPULimit               string
-	PrometheusPort             int32
+	// OtelPasswordSecret optionally supplies otel_monitor's password key.
+	OtelPasswordSecret string
+	OTelMemoryRequest  string
+	OTelMemoryLimit    string
+	OTelCPURequest     string
+	OTelCPULimit       string
+	PrometheusPort     int32
 	// GatewayContainerName and GatewayPort name and expose the gateway sidecar.
 	GatewayContainerName string
 	GatewayPort          int32
@@ -169,6 +172,7 @@ func FromParameters(
 	otelParameters := append([]string{
 		prometheusPortParameter,
 		otelConfigHashParameter,
+		otelPasswordSecretParameter,
 		otelMemoryRequestParameter,
 		otelMemoryLimitParameter,
 		otelCPURequestParameter,
@@ -206,6 +210,7 @@ func FromParameters(
 		OtelCollectorImage:         otelCollectorImage,
 		OtelConfigMapName:          otelConfigMapName,
 		OtelConfigHash:             helper.Parameters[otelConfigHashParameter],
+		OtelPasswordSecret:         helper.Parameters[otelPasswordSecretParameter],
 		OTelMemoryRequest:          helper.Parameters[otelMemoryRequestParameter],
 		OTelMemoryLimit:            helper.Parameters[otelMemoryLimitParameter],
 		OTelCPURequest:             helper.Parameters[otelCPURequestParameter],

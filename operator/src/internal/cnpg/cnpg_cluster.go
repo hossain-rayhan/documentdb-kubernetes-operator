@@ -114,6 +114,7 @@ func GetCnpgClusterSpecFromIntent(req ctrl.Request, intent product.ClusterIntent
 					if split.MonitoringEnabled {
 						params[util.PLUGIN_PARAM_OTEL_COLLECTOR_IMAGE] = util.OtelCollectorImage()
 						params[util.PLUGIN_PARAM_OTEL_CONFIG_MAP_NAME] = otelcfg.ConfigMapName(intent.Identity.Name)
+						addPluginParamIfSet(params, util.PLUGIN_PARAM_OTEL_PASSWORD_SECRET, intent.Product.Postgres.MonitoringPasswordSecret)
 						addPluginParamIfSet(params, util.PLUGIN_PARAM_OTEL_MEMORY_REQUEST, split.OTel.MemoryRequest)
 						addPluginParamIfSet(params, util.PLUGIN_PARAM_OTEL_MEMORY_LIMIT, split.OTel.MemoryLimit)
 						addPluginParamIfSet(params, util.PLUGIN_PARAM_OTEL_CPU_REQUEST, split.OTel.CPURequest)
@@ -152,7 +153,7 @@ func GetCnpgClusterSpecFromIntent(req ctrl.Request, intent product.ClusterIntent
 			spec.MaxStopDelay = stopDelayOrDefault(intent.Postgres.StopDelay)
 			applyPostgresProcessIdentity(&spec, intent)
 			applyIOUringSeccomp(&spec, intent)
-			applyOtelMonitorRole(&spec, intent.Monitoring)
+			applyOtelMonitorRole(&spec, intent.Monitoring, intent.Product.Postgres.MonitoringPasswordSecret)
 
 			return spec
 		}(),
@@ -361,10 +362,9 @@ func applyIOUringSeccomp(spec *cnpgv1.ClusterSpec, intent product.ClusterIntent)
 // Collector sidecar. When monitoring is disabled, the role remains declared
 // with ensure=absent so CNPG removes any role left by an earlier configuration.
 //
-// PostgreSQL host authentication currently uses trust, so a generated password
-// would not be checked. Disable the role password explicitly until authentication
-// is tightened rather than creating an unused credential and widening Secret RBAC.
-func applyOtelMonitorRole(spec *cnpgv1.ClusterSpec, monitoring *dbpreview.MonitoringSpec) {
+// Password authentication is an explicit product choice backed by an existing
+// Secret. Without one, retain the password-disabled DocumentDB default.
+func applyOtelMonitorRole(spec *cnpgv1.ClusterSpec, monitoring *dbpreview.MonitoringSpec, passwordSecret string) {
 	if spec.Managed == nil {
 		spec.Managed = &cnpgv1.ManagedConfiguration{}
 	}
@@ -383,6 +383,10 @@ func applyOtelMonitorRole(spec *cnpgv1.ClusterSpec, monitoring *dbpreview.Monito
 			// keeping SyncCnpgCluster's diff stable (no perpetual re-patching).
 			ConnectionLimit: -1,
 			Inherit:         pointer.Bool(true),
+		}
+		if passwordSecret != "" {
+			role.DisablePassword = false
+			role.PasswordSecret = &cnpgv1.LocalObjectReference{Name: passwordSecret}
 		}
 	}
 	spec.Managed.Roles = append(spec.Managed.Roles, role)

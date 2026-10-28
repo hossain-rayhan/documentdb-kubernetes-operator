@@ -403,7 +403,7 @@ func TestGatewaySecurityContext_PSARestrictedAsUID1000(t *testing.T) {
 // restricted and, unlike the gateway, does not force a UID so the collector
 // image keeps its own non-root user (UID 10001).
 func TestNewOtelCollectorSidecar_Hardened(t *testing.T) {
-	c := newOtelCollectorSidecar("otel/opentelemetry-collector-contrib:test")
+	c := newOtelCollectorSidecar("otel/opentelemetry-collector-contrib:test", "")
 
 	if c.Name != otelCollectorContainerName {
 		t.Fatalf("container name = %q, want %q", c.Name, otelCollectorContainerName)
@@ -420,7 +420,7 @@ func TestNewOtelCollectorSidecar_Hardened(t *testing.T) {
 // TestNewOtelCollectorSidecar_MonitorUser asserts the sidecar connects using
 // the dedicated monitoring identity without injecting an unused password.
 func TestNewOtelCollectorSidecar_MonitorUser(t *testing.T) {
-	c := newOtelCollectorSidecar("otel/opentelemetry-collector-contrib:test")
+	c := newOtelCollectorSidecar("otel/opentelemetry-collector-contrib:test", "")
 
 	for _, env := range c.Env {
 		if env.Name == "PGPASSWORD" {
@@ -434,6 +434,42 @@ func TestNewOtelCollectorSidecar_MonitorUser(t *testing.T) {
 		}
 	}
 	t.Fatal("missing PGUSER env var")
+}
+
+func TestLifecycleHookMonitoringPasswordSecret(t *testing.T) {
+	for _, secret := range []string{"", "monitor-password"} {
+		t.Run("secret="+secret, func(t *testing.T) {
+			containers := runCreateHook(t, map[string]string{
+				"otelCollectorImage": "otel/opentelemetry-collector-contrib:test",
+				"otelConfigMapName":  "demo-otel-config",
+				"otelPasswordSecret": secret,
+			})
+			collector, ok := containers[otelCollectorContainerName]
+			if !ok {
+				t.Fatal("collector was not injected")
+			}
+			var password *corev1.EnvVar
+			for i := range collector.Env {
+				env := &collector.Env[i]
+				if env.Name == "PGPASSWORD" {
+					password = env
+				}
+			}
+			if secret == "" {
+				if password != nil {
+					t.Fatal("default collector must not receive PGPASSWORD")
+				}
+				return
+			}
+			if password == nil || password.Value != "" || password.ValueFrom == nil || password.ValueFrom.SecretKeyRef == nil {
+				t.Fatalf("PGPASSWORD must use a SecretKeyRef, got %+v", password)
+			}
+			ref := password.ValueFrom.SecretKeyRef
+			if ref.Name != secret || ref.Key != "password" || (ref.Optional != nil && *ref.Optional) {
+				t.Fatalf("PGPASSWORD secret selector = %+v", ref)
+			}
+		})
+	}
 }
 
 func runCreateHook(t *testing.T, params map[string]string) map[string]corev1.Container {

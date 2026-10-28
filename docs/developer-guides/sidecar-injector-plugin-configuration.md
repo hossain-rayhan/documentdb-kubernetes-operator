@@ -106,6 +106,14 @@ plugins:
 
 ## CNPG Plugin Parameters
 
+When a product uses password authentication for the SQL monitoring role, the
+optional `otelPasswordSecret` parameter names the same namespace-local
+`kubernetes.io/basic-auth` Secret that CNPG's `otel_monitor` managed role uses.
+The injector sets the collector's `PGPASSWORD` from its `password` key.
+`ProductProfile.Postgres.MonitoringPasswordSecret` wires both references; the
+default DocumentDB configuration omits this parameter. No trust rules are
+added to the product's authentication policy.
+
 The DocumentDB controller automatically passes all configuration parameters to the sidecar injector plugin via CNPG's plugin parameter mechanism:
 
 ```yaml
@@ -162,5 +170,4 @@ spec:
   exposeViaService:
     serviceType: "LoadBalancer"
 ```
-
 

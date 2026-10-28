@@ -5,6 +5,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -431,4 +432,140 @@ func getDocumentDBByName(t *testing.T, c client.Client, name string) *dbpreview.
 		t.Fatal(err)
 	}
 	return db
+}
+
+func TestStatusRefreshKeepsConcurrentServiceNameChoice(t *testing.T) {
+	ctx := context.Background()
+	s := newTestScheme(t)
+	db := longCluster("-west", "west-uid")
+	naming := product.DocumentDBProfile().Naming
+	legacy, _ := naming.LegacyServiceName(db.Name)
+	hashed := naming.ServiceName(db.Name)
+	foreign := ownedService(legacy, "10.0.0.1", longCluster("-east", "east-uid"))
+	c := newFakeClient(t, s, nil, db, foreign, legacyCert(db, legacy))
+	stale := getDocumentDBByName(t, c, db.Name)
+	winner := getDocumentDBByName(t, c, db.Name)
+	if _, err := gatewayServiceName(ctx, c, naming, winner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+	if err := newCertReconciler(c, s).updateTLSStatus(ctx, stale, func(st *dbpreview.TLSStatus) { st.Ready = false }); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gatewayServiceName(ctx, c, naming, stale); err != nil || got != hashed {
+		t.Fatalf("concurrent choice overwritten: name=%q, err=%v; want %q", got, err, hashed)
+	}
+}
+
+func TestCertificateDNSPatchRejectsStaleSnapshots(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		t.Run(fmt.Sprint("replacement=", replace), func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestScheme(t)
+			db := testCluster()
+			cert := legacyCert(db, "original.example.com")
+			cert.UID = "original-certificate"
+			c := newFakeClient(t, s, nil, db, cert)
+			stale := &cmapi.Certificate{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(cert), stale); err != nil {
+				t.Fatal(err)
+			}
+			current := stale.DeepCopy()
+			if replace {
+				if err := c.Delete(ctx, current); err != nil {
+					t.Fatal(err)
+				}
+				current.UID = "replacement-certificate"
+				current.OwnerReferences[0].UID = "another-owner"
+				current.ResourceVersion = ""
+				current.Spec.DNSNames = []string{"replacement.example.com"}
+				if err := c.Create(ctx, current); err != nil {
+					t.Fatal(err)
+				}
+				// The fake tracker reuses its initial version on recreation;
+				// advance it to model the API server's distinct replacement RV.
+				current.Annotations = map[string]string{"replacement": "true"}
+				if err := c.Update(ctx, current); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				current.Spec.DNSNames = append(current.Spec.DNSNames, "concurrent.example.com")
+				if err := c.Update(ctx, current); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := slices.Clone(current.Spec.DNSNames)
+			if _, _, err := newCertReconciler(c, s).ensureServiceDNSNames(ctx, db, stale, []string{"documentdb-service-db"}); !apierrors.IsConflict(err) {
+				t.Fatalf("stale certificate patch must conflict, got %v", err)
+			}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(cert), current); err != nil || !slices.Equal(current.Spec.DNSNames, want) {
+				t.Fatalf("concurrent certificate was changed: %v, %v; want %v", current.Spec.DNSNames, err, want)
+			}
+		})
+	}
+}
+
+func TestLostAnnotationRecoversExistingHashedService(t *testing.T) {
+	ctx := context.Background()
+	db := longCluster("-west", "west-uid")
+	naming := product.DocumentDBProfile().Naming
+	legacy, _ := naming.LegacyServiceName(db.Name)
+	hashed := naming.ServiceName(db.Name)
+	c := newFakeClient(t, newTestScheme(t), nil, db,
+		ownedService(hashed, "10.0.0.2", db), legacyCert(db, legacy, hashed))
+	if got, err := gatewayServiceName(ctx, c, naming, db); err != nil || got != hashed {
+		t.Fatalf("existing hashed endpoint abandoned after annotation loss: %q, %v", got, err)
+	}
+}
+
+func TestMigrationHoldsEndpointUntilCertificateIssued(t *testing.T) {
+	ctx := context.Background()
+	s := newTestScheme(t)
+	east, west := longCluster("-east", "east-uid"), longCluster("-west", "west-uid")
+	naming := product.DocumentDBProfile().Naming
+	legacy, _ := naming.LegacyServiceName(west.Name)
+	hashed := naming.ServiceName(west.Name)
+	cert := legacyCert(west, legacy, legacy+".default", legacy+".default.svc")
+	cert.Generation = 1
+	cert.Status.Conditions = []cmapi.CertificateCondition{{
+		Type: cmapi.CertificateConditionReady, Status: cmmeta.ConditionTrue, ObservedGeneration: 1,
+	}}
+	west.Status.TLS = &dbpreview.TLSStatus{Ready: true, SecretName: cert.Spec.SecretName}
+	c := newFakeClient(t, s, nil, east, west, cert,
+		ownedService(legacy, "10.0.0.1", east), ownedService(hashed, "10.0.0.2", west))
+	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(west)}
+	r, _ := newClusterReconciler(c, s, &sqlRecorder{roleOut: "(1 row)"})
+	assertEndpoint := func(enabled bool) {
+		t.Helper()
+		if _, err := r.Reconcile(ctx, key); err != nil {
+			t.Fatal(err)
+		}
+		svc := &corev1.Service{}
+		if err := c.Get(ctx, types.NamespacedName{Name: hashed, Namespace: testNamespace}, svc); err != nil {
+			t.Fatal(err)
+		}
+		if got := svc.Spec.Selector["app"] == west.Name; got != enabled {
+			t.Fatalf("endpoint enabled=%v, want %v; selector=%v", got, enabled, svc.Spec.Selector)
+		}
+	}
+	assertEndpoint(false)
+	if _, err := newCertReconciler(c, s).Reconcile(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	updated := &cmapi.Certificate{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cert), updated); err != nil {
+		t.Fatal(err)
+	}
+	updated.Generation = 2
+	if err := c.Update(ctx, updated); err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(false)
+	updated.Status.Conditions[0].ObservedGeneration = 2
+	if err := c.Update(ctx, updated); err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(true)
 }

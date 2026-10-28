@@ -1063,6 +1063,15 @@ func TestUpsertServiceConvergesPorts(t *testing.T) {
 	if got.Labels["team"] != "data" || got.Annotations["example.com/keep"] != "true" || got.Spec.SessionAffinity != corev1.ServiceAffinityNone {
 		t.Errorf("unrelated fields not preserved: %+v", got)
 	}
+	for _, enabled := range []bool{false, true} {
+		opts.EndpointEnabled = enabled
+		if got, err = UpsertService(ctx, c, BuildGatewayService(opts)); err != nil {
+			t.Fatal(err)
+		}
+		if active := got.Spec.Selector[LABEL_APP] == opts.ClusterName; active != enabled {
+			t.Fatalf("endpoint enabled=%v, want %v; selector=%v", active, enabled, got.Spec.Selector)
+		}
+	}
 
 	foreignOpts := opts
 	foreignOpts.Name = "foreign"

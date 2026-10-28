@@ -29,11 +29,12 @@ import (
 
 // Product-neutral seam.
 type (
-	ProductProfile  = product.ProductProfile
-	PostgresProfile = product.PostgresProfile
-	ExtensionSpec   = product.ExtensionSpec
-	GatewayProfile  = product.GatewayProfile
-	Adapter         = product.Adapter
+	ProductProfile         = product.ProductProfile
+	PostgresProfile        = product.PostgresProfile
+	ExtensionSpec          = product.ExtensionSpec
+	ExtensionVersionFormat = product.ExtensionVersionFormat
+	GatewayProfile         = product.GatewayProfile
+	Adapter                = product.Adapter
 
 	ClusterIntent      = product.ClusterIntent
 	Images             = product.Images
@@ -47,6 +48,11 @@ type (
 	TLS                = product.TLS
 	Recovery           = product.Recovery
 	Bootstrap          = product.Bootstrap
+)
+
+const (
+	ExtensionVersionDocumentDB = product.ExtensionVersionDocumentDB
+	ExtensionVersionSemver     = product.ExtensionVersionSemver
 )
 
 // Rendering and sync.

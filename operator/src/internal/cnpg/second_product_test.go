@@ -47,11 +47,12 @@ func pgcosmosIntent() product.ClusterIntent {
 					DynamicLibraryPath:   []string{"lib"},
 					ExtensionControlPath: []string{"share"},
 				},
-				AdditionalLibraries:  []string{"pgcosmos_core"},
-				BootstrapSQL:         []string{"CREATE EXTENSION pgcosmos CASCADE"},
-				PgHBA:                []string{"host all all 0.0.0.0/0 scram-sha-256"},
-				ProtectedParameters:  map[string]string{"pgcosmos.locked": "operator"},
-				ReplicationAdminRole: "cosmos_admin",
+				AdditionalLibraries:      []string{"pgcosmos_core"},
+				BootstrapSQL:             []string{"CREATE EXTENSION pgcosmos CASCADE"},
+				PgHBA:                    []string{"host all all 0.0.0.0/0 scram-sha-256"},
+				MonitoringPasswordSecret: "cosmos-monitor-password",
+				ProtectedParameters:      map[string]string{"pgcosmos.locked": "operator"},
+				ReplicationAdminRole:     "cosmos_admin",
 			},
 			Gateway: product.GatewayProfile{ContainerName: "pgcosmos-gateway", Port: 8081},
 		},
@@ -111,10 +112,16 @@ func TestSecondProductRendersWithoutDocumentDBLiterals(t *testing.T) {
 		util.PLUGIN_PARAM_GATEWAY_TLS_SECRET:     "acct-tls",
 		util.PLUGIN_PARAM_GATEWAY_CONTAINER_NAME: "pgcosmos-gateway",
 		util.PLUGIN_PARAM_GATEWAY_PORT:           "8081",
+		util.PLUGIN_PARAM_OTEL_PASSWORD_SECRET:   "cosmos-monitor-password",
 	} {
 		if params[k] != want {
 			t.Errorf("plugin param %s = %q, want %q", k, params[k], want)
 		}
+	}
+	role := cluster.Spec.Managed.Roles[0]
+	if role.Name != otelcfg.MonitorRoleName || !role.Login || role.DisablePassword ||
+		role.PasswordSecret == nil || role.PasswordSecret.Name != intent.Product.Postgres.MonitoringPasswordSecret {
+		t.Errorf("SCRAM monitoring role = %+v", role)
 	}
 
 	if len(cluster.OwnerReferences) != 1 || cluster.OwnerReferences[0].Kind != "CosmosAccount" {
