@@ -237,6 +237,7 @@ func TestToParametersRoundTrip(t *testing.T) {
 		OtelCollectorImage:     "otel:latest",
 		OtelConfigMapName:      "otel-config",
 		OtelConfigHash:         "abc123",
+		OtelPasswordSecret:     "monitor-password",
 		OTelMemoryRequest:      "64Mi",
 		OTelMemoryLimit:        "128Mi",
 		OTelCPURequest:         "100m",
@@ -279,6 +280,9 @@ func TestToParametersRoundTrip(t *testing.T) {
 	}
 	if restored.OtelConfigHash != original.OtelConfigHash {
 		t.Errorf("round-trip OTel config hash = %q, want %q", restored.OtelConfigHash, original.OtelConfigHash)
+	}
+	if restored.OtelPasswordSecret != original.OtelPasswordSecret {
+		t.Errorf("round-trip OTel password secret = %q, want %q", restored.OtelPasswordSecret, original.OtelPasswordSecret)
 	}
 	if restored.OTelMemoryRequest != original.OTelMemoryRequest {
 		t.Errorf("round-trip otel memory request = %q, want %q", restored.OTelMemoryRequest, original.OTelMemoryRequest)

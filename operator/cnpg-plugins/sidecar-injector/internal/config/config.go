@@ -342,6 +342,7 @@ func (config *Configuration) ToParameters() (map[string]string, error) {
 	setIfNotEmpty(otelCollectorImageParameter, config.OtelCollectorImage)
 	setIfNotEmpty(otelConfigMapNameParameter, config.OtelConfigMapName)
 	setIfNotEmpty(otelConfigHashParameter, config.OtelConfigHash)
+	setIfNotEmpty(otelPasswordSecretParameter, config.OtelPasswordSecret)
 	setIfNotEmpty(otelMemoryRequestParameter, config.OTelMemoryRequest)
 	setIfNotEmpty(otelMemoryLimitParameter, config.OTelMemoryLimit)
 	setIfNotEmpty(otelCPURequestParameter, config.OTelCPURequest)

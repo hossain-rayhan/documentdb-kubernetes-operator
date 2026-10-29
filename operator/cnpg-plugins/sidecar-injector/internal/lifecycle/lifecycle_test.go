@@ -11,11 +11,13 @@ import (
 	"testing"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+	"github.com/cloudnative-pg/cnpg-i-machinery/pkg/pluginhelper/common"
 	cnpglifecycle "github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	pluginconfig "github.com/documentdb/cnpg-i-sidecar-injector/internal/config"
 	pluginmetadata "github.com/documentdb/cnpg-i-sidecar-injector/pkg/metadata"
 )
 
@@ -439,11 +441,19 @@ func TestNewOtelCollectorSidecar_MonitorUser(t *testing.T) {
 func TestLifecycleHookMonitoringPasswordSecret(t *testing.T) {
 	for _, secret := range []string{"", "monitor-password"} {
 		t.Run("secret="+secret, func(t *testing.T) {
-			containers := runCreateHook(t, map[string]string{
+			configuration, errs := pluginconfig.FromParameters(&common.Plugin{Parameters: map[string]string{
 				"otelCollectorImage": "otel/opentelemetry-collector-contrib:test",
 				"otelConfigMapName":  "demo-otel-config",
 				"otelPasswordSecret": secret,
-			})
+			}})
+			if len(errs) != 0 {
+				t.Fatalf("FromParameters() validation errors: %v", errs)
+			}
+			params, err := configuration.ToParameters()
+			if err != nil {
+				t.Fatalf("ToParameters() error: %v", err)
+			}
+			containers := runCreateHook(t, params)
 			collector, ok := containers[otelCollectorContainerName]
 			if !ok {
 				t.Fatal("collector was not injected")
