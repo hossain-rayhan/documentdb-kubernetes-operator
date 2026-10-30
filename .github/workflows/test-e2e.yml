@@ -616,3 +616,165 @@ jobs:
             /tmp/cluster-logs/
           if-no-files-found: ignore
           retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Combined-image fallback: with ImageVolume unusable, the default
+  # imageMode=auto must run PostgreSQL from the PUBLISHED combined image
+  # (documentdb-combined:18-<chart documentDbVersion>) and the node must pull
+  # the variant for its own architecture. Rows cover both detection paths:
+  # the API gate disabled (amd64 + arm64) and a node runtime without image
+  # volume support (containerd 1.7 in kindest/node:v1.32.0).
+  #
+  # The DocumentDB pins spec.documentDBVersion to the chart's documentDbVersion
+  # because CI tags database images per run (<version>-test-<run_id>), and no
+  # combined image exists for those tags.
+  # ---------------------------------------------------------------------------
+  combined-image:
+    name: Combined image (${{ matrix.architecture }}, ${{ matrix.case }})
+    needs: [build]
+    if: always() && needs.build.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-22.04
+            case: k8s v1.33.7, ImageVolume gate off
+            scenario: combined-gate-off
+            kubernetes_version: v1.33.7
+            feature_gates: 'ImageVolume=false'
+          - architecture: arm64
+            runner: ubuntu-22.04-arm
+            case: k8s v1.33.7, ImageVolume gate off
+            scenario: combined-gate-off
+            kubernetes_version: v1.33.7
+            feature_gates: 'ImageVolume=false'
+          - architecture: amd64
+            runner: ubuntu-22.04
+            case: k8s v1.32.0, containerd 1.7
+            scenario: combined-containerd17
+            kubernetes_version: v1.32.0
+            feature_gates: ''
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+      EXT_IMAGE_TAG: ${{ needs.build.outputs.ext_image_tag }}
+      CHART_VERSION: ${{ needs.build.outputs.chart_version || '0.1.0' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download platform images artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-platform-images
+          path: ./artifacts/build-platform-images
+
+      - name: Download helm chart artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-helm-chart-${{ matrix.architecture }}
+          path: ./artifacts/build-helm-chart-${{ matrix.architecture }}
+
+      - name: Setup test environment (operator only, no DocumentDB)
+        uses: ./.github/actions/setup-test-environment
+        with:
+          test-type: 'e2e'
+          architecture: ${{ matrix.architecture }}
+          runner: ${{ matrix.runner }}
+          test-scenario-name: ${{ matrix.scenario }}
+          node-count: '1'
+          instances-per-node: '1'
+          cert-manager-namespace: ${{ env.CERT_MANAGER_NS }}
+          operator-namespace: ${{ env.OPERATOR_NS }}
+          db-namespace: ${{ env.DB_NS }}
+          db-cluster-name: ${{ env.DB_NAME }}
+          db-username: ${{ env.DB_USERNAME }}
+          db-password: ${{ env.DB_PASSWORD }}
+          db-port: ${{ env.DB_PORT }}
+          image-tag: ${{ env.IMAGE_TAG }}
+          documentdb-image-tag: ${{ env.EXT_IMAGE_TAG }}
+          chart-version: ${{ env.CHART_VERSION }}
+          use-external-images: 'false'
+          kubernetes-version: ${{ matrix.kubernetes_version }}
+          kind-feature-gates: ${{ matrix.feature_gates }}
+          deploy-documentdb: 'false'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository-owner: ${{ github.repository_owner }}
+
+      - name: Resolve the published combined image
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -E '^documentDbVersion:' operator/documentdb-helm-chart/values.yaml \
+            | sed -E 's/^documentDbVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/')
+          IMAGE="ghcr.io/documentdb/documentdb-kubernetes-operator/documentdb-combined:18-${VERSION}"
+          echo "Expected combined image: ${IMAGE} (linux/${{ matrix.architecture }})"
+          if ! docker buildx imagetools inspect --raw "${IMAGE}" \
+              | jq -e --arg arch "${{ matrix.architecture }}" \
+                '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)' >/dev/null; then
+            echo "::error::${IMAGE} is not published for linux/${{ matrix.architecture }}"
+            exit 1
+          fi
+          {
+            echo "DOCDB_VERSION=${VERSION}"
+            echo "EXPECTED_IMAGE=${IMAGE}"
+            # X.Y.Z -> X.Y-Z (pg_extension version)
+            echo "EXPECTED_EXT_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+)\.([0-9]+).*/\1-\2/')"
+          } >> "$GITHUB_ENV"
+
+      - name: Deploy DocumentDB (imageMode=auto)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat <<EOF | kubectl apply -f -
+          apiVersion: documentdb.io/preview
+          kind: DocumentDB
+          metadata:
+            name: ${{ env.DB_NAME }}
+            namespace: ${{ env.DB_NS }}
+          spec:
+            nodeCount: 1
+            instancesPerNode: 1
+            documentDBVersion: "${DOCDB_VERSION}"
+            resource:
+              storage:
+                pvcSize: 5Gi
+                storageClass: csi-hostpath-sc
+            exposeViaService:
+              serviceType: ClusterIP
+          EOF
+          echo "Waiting for DocumentDB to become healthy..."
+          if ! kubectl wait documentdb/${{ env.DB_NAME }} -n ${{ env.DB_NS }} \
+              --for=jsonpath='{.status.status}'='Cluster in healthy state' --timeout=15m; then
+            kubectl get documentdb,clusters.postgresql.cnpg.io,pods -n ${{ env.DB_NS }} -o wide || true
+            kubectl get events -n ${{ env.DB_NS }} --sort-by=.lastTimestamp | tail -40 || true
+            exit 1
+          fi
+
+      - name: Assert combined image, architecture, extension and Mongo access
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+          KIND_CLUSTER: documentdb-e2e-${{ matrix.architecture }}-${{ matrix.scenario }}
+        run: bash .github/scripts/assert-combined-image.sh
+
+      - name: Collect cluster diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-logs
+        with:
+          architecture: ${{ matrix.architecture }}
+          operator-namespace: ${{ env.OPERATOR_NS }}
+          db-namespace: ${{ env.DB_NS }}
+          db-name: ${{ env.DB_NAME }}
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-image-${{ matrix.architecture }}-${{ matrix.scenario }}-logs-${{ github.run_attempt }}
+          path: |
+            /tmp/cluster-logs/
+          if-no-files-found: ignore
+          retention-days: 14
