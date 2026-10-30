@@ -5,8 +5,12 @@ package imagemode
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,28 +54,55 @@ const probeVolumeName = "probe"
 //     OFF the API server admits the Pod and silently strips the disabled field.
 //   - baseline ok, image accepted and retained -> supported.
 //
+// Only a definitive rejection by the API server counts as a rejection above.
+// Retryable failures of either request (timeouts, throttling, server errors,
+// transport errors) are returned as an error so the caller retries instead of
+// permanently selecting a mode from a transient outage.
+//
 // The probe only covers the API server. Whether the node container runtime can
 // actually mount image volumes is checked separately (see CheckNodes).
-func ProbeAPI(ctx context.Context, c client.Client, namespace string) ProbeResult {
+func ProbeAPI(ctx context.Context, c client.Client, namespace string) (ProbeResult, error) {
 	logger := log.FromContext(ctx)
 
 	if _, err := dryRunProbePod(ctx, c, namespace, baselineProbeVolume()); err != nil {
+		if retryable(err) {
+			return ProbeInconclusive, fmt.Errorf("baseline image volume probe pod: %w", err)
+		}
 		logger.Info("ImageVolume API probe inconclusive: baseline probe pod rejected", "error", err)
-		return ProbeInconclusive
+		return ProbeInconclusive, nil
 	}
 
 	returned, err := dryRunProbePod(ctx, c, namespace, imageProbeVolume())
 	if err != nil {
+		if retryable(err) {
+			return ProbeInconclusive, fmt.Errorf("image volume probe pod: %w", err)
+		}
 		logger.Info("ImageVolume API probe: image-volume probe pod rejected while baseline passed; feature unavailable", "error", err)
-		return ProbeUnsupported
+		return ProbeUnsupported, nil
 	}
 
 	if !hasImageVolume(returned) {
 		logger.Info("ImageVolume API probe: image-volume probe pod admitted but the ImageVolumeSource was pruned; feature gate is off")
-		return ProbeUnsupported
+		return ProbeUnsupported, nil
 	}
 
-	return ProbeSupported
+	return ProbeSupported, nil
+}
+
+// retryable reports whether a dry-run error says nothing about the API
+// server's capabilities or admission policy. Only a 4xx status other than
+// 408/429 (for example Invalid, Forbidden by Pod Security Admission or quota,
+// or BadRequest) is a definitive answer; timeouts, throttling, server errors
+// and errors without an API status (transport failures, context cancellation)
+// are retried.
+func retryable(err error) bool {
+	var status apierrors.APIStatus
+	if !errors.As(err, &status) {
+		return true
+	}
+	code := status.Status().Code
+	return code == 0 || code == http.StatusRequestTimeout || code == http.StatusTooManyRequests ||
+		code >= http.StatusInternalServerError
 }
 
 // hasImageVolume reports whether the server-returned Pod still carries the

@@ -585,12 +585,15 @@ func CombinedImageRepo() string {
 var combinedVersionTagPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+`)
 
 // CombinedImage returns the combined PostgreSQL + DocumentDB image for a
-// cluster: <combined repo>:<pg major>-<version>. The version is the tag of an
-// explicit extension image when that tag names a release, otherwise the first
-// non-empty of specVersion, envVersion, and DEFAULT_DOCUMENTDB_TAG. Only the
-// version is carried over; the repository always comes from CombinedImageRepo.
+// cluster: <combined repo>:<pg major>-<version>. The version is the
+// ReleaseVersionTag of an explicit extension image when that tag names a
+// release, otherwise the first non-empty of specVersion, envVersion, and
+// DEFAULT_DOCUMENTDB_TAG. This is the same precedence admission uses to
+// resolve the binary version, so the schema and rollback checks validate the
+// version that actually runs. Only the version is carried over; the
+// repository always comes from CombinedImageRepo.
 func CombinedImage(explicitExtensionImage, specVersion, envVersion string) string {
-	version := ImageTag(explicitExtensionImage)
+	version := ReleaseVersionTag(explicitExtensionImage)
 	if !combinedVersionTagPattern.MatchString(version) {
 		version = specVersion
 	}
@@ -601,6 +604,18 @@ func CombinedImage(explicitExtensionImage, specVersion, envVersion string) strin
 		version = DEFAULT_DOCUMENTDB_TAG
 	}
 	return fmt.Sprintf("%s:%s-%s", CombinedImageRepo(), COMBINED_IMAGE_PG_MAJOR, version)
+}
+
+// ReleaseVersionTag returns the tag of an image reference when it can identify
+// the binary version, or "" otherwise. Digest-qualified references
+// ("repo:tag@sha256:...") return "": the digest decides what runs, so its tag
+// is not trusted as a version. Admission (validation.ImageTagSemver) and
+// combined-image rendering both use this so they agree on the binary version.
+func ReleaseVersionTag(image string) string {
+	if strings.Contains(image, "@") {
+		return ""
+	}
+	return ImageTag(image)
 }
 
 // ImageTag returns the tag of an image reference, or "" when the reference has

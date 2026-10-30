@@ -72,13 +72,7 @@ func ExtractSemver(tag string) string {
 // ImageTagSemver returns the semver of an image reference's tag, or "" for
 // digest references and unparseable tags.
 func ImageTagSemver(ref string) string {
-	if ref == "" || strings.Contains(ref, "@sha256:") {
-		return ""
-	}
-	if tagIdx := strings.LastIndex(ref, ":"); tagIdx >= 0 {
-		return ExtractSemver(ref[tagIdx+1:])
-	}
-	return ""
+	return ExtractSemver(util.ReleaseVersionTag(ref))
 }
 
 // ResolveBinaryVersion extracts the binary version pinned by a spec.

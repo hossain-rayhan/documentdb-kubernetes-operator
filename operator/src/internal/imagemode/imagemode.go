@@ -151,7 +151,11 @@ func (d *Detector) Detect(ctx context.Context, namespace string) (Mode, string, 
 		return Combined, reason, nil
 	}
 
-	switch ProbeAPI(ctx, d.Client, namespace) {
+	result, err := ProbeAPI(ctx, d.Client, namespace)
+	if err != nil {
+		return "", "", fmt.Errorf("probing image volume support in the API server: %w", err)
+	}
+	switch result {
 	case ProbeSupported:
 		return ImageVolume, "all node container runtimes and the API server support image volumes", nil
 	case ProbeUnsupported:

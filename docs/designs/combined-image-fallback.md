@@ -116,11 +116,14 @@ also makes its existing events visible.)
 
 **Tag resolution.** The operator reuses the extension version so both modes run
 the same DocumentDB build: `<combined repo>:18-<v>`, where `<v>` is the tag of
-`spec.image.documentDB` when that tag names a release (`X.Y…`), else
-`spec.documentDBVersion`, else the `DOCUMENTDB_VERSION` env (Helm
-`documentDbVersion`), else the compiled default. Digest-only references,
-`latest`, and the change-stream images therefore never produce a nonexistent
-combined tag. Only the version is taken from `spec.image.documentDB`; the
+`spec.image.documentDB` when that tag names a release (`X.Y…`) and the
+reference has no digest, else `spec.documentDBVersion`, else the
+`DOCUMENTDB_VERSION` env (Helm `documentDbVersion`), else the compiled default.
+Digest references (with or without a tag), `latest`, and the change-stream
+images therefore never produce a nonexistent combined tag. Admission resolves
+the binary version with the same precedence (both use
+`util.ReleaseVersionTag`), so the `schemaVersion` and image-rollback checks
+validate the version the combined image actually runs. Only the version is taken from `spec.image.documentDB`; the
 repository defaults to the GHCR path above and can be overridden with
 `DOCUMENTDB_COMBINED_IMAGE_REPO` (Helm `image.documentdbCombined.repository`).
 `DOCUMENTDB_IMAGE_PULL_POLICY` also applies to the combined image through CNPG
@@ -200,7 +203,7 @@ combined image.
 - No in-place migration from `combined` to `imageVolume`.
 - `spec.image.postgres` is ignored in combined mode (PostgreSQL ships inside the
   combined image), as are the repository and digest of `spec.image.documentDB`
-  (only a release tag is reused); mirror the combined image through
+  (only a release tag of a reference without a digest is reused); mirror the combined image through
   `image.documentdbCombined.repository`.
 - The change-stream feature gate has no combined image; in combined mode the
   regular combined image for the cluster version is used.

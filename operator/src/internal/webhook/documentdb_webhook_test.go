@@ -5,6 +5,7 @@ package webhook
 
 import (
 	"context"
+	"strings"
 
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	. "github.com/onsi/ginkgo/v2"
@@ -19,7 +20,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	dbpreview "github.com/documentdb/documentdb-operator/api/preview"
+	"github.com/documentdb/documentdb-operator/internal/product"
 	util "github.com/documentdb/documentdb-operator/internal/utils"
+	"github.com/documentdb/documentdb-operator/internal/validation"
 )
 
 type fakeWebhookManager struct {
@@ -891,5 +894,39 @@ var _ = Describe("restore schema compatibility validation", func() {
 		Expect(errs).To(BeEmpty())
 		Expect(warnings).To(HaveLen(1))
 		Expect(warnings[0]).To(ContainSubstring("no recorded schema version"))
+	})
+})
+
+var _ = Describe("combined image version agrees with admission", func() {
+	const digest = "@sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+
+	// combinedVersion is the DocumentDB version the combined image would run.
+	combinedVersion := func(db *dbpreview.DocumentDB) string {
+		tag := util.ImageTag(product.DocumentDBAdapter{}.CombinedImage(db))
+		return validation.ExtractSemver(strings.TrimPrefix(tag, util.COMBINED_IMAGE_PG_MAJOR+"-"))
+	}
+
+	DescribeTable("renders the binary version admission validates",
+		func(version, image string) {
+			db := newTestDocumentDB(version, "", image)
+			Expect(combinedVersion(db)).To(Equal(resolveBinaryVersion(db)))
+		},
+		Entry("version only", "1.0.0", ""),
+		Entry("image tag wins over version", "1.0.0", "ghcr.io/documentdb/documentdb:0.117.0"),
+		Entry("tag plus digest falls back to version", "1.0.0", "ghcr.io/documentdb/documentdb:0.117.0"+digest),
+		Entry("digest only falls back to version", "1.0.0", "ghcr.io/documentdb/documentdb"+digest),
+		Entry("non-release tag falls back to version", "1.0.0", "ghcr.io/documentdb/documentdb:latest"),
+		Entry("RC tag", "", "ghcr.io/documentdb/documentdb:1.0-RC2"),
+	)
+
+	It("blocks a tag-plus-digest rollback that combined mode would otherwise run", func() {
+		oldDB := newTestDocumentDB("1.0.0", "", "")
+		oldDB.Status.SchemaVersion = "1.0.0"
+		newDB := newTestDocumentDB("1.0.0", "", "ghcr.io/documentdb/documentdb:0.117.0"+digest)
+
+		// Admission sees no rollback because the digest-qualified tag is not a
+		// version; combined mode must therefore keep running 1.0.0.
+		Expect((&DocumentDBValidator{}).validateImageRollback(newDB, oldDB)).To(BeEmpty())
+		Expect(product.DocumentDBAdapter{}.CombinedImage(newDB)).To(HaveSuffix(":18-1.0.0"))
 	})
 })

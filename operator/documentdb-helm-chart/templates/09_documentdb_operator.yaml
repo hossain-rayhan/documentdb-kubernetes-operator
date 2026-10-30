@@ -121,9 +121,11 @@ spec:
         - name: DOCUMENTDB_EXTENSION_IMAGE_REPO
           value: "{{ include "documentdb.imageRef" (dict "name" "image.documentdb.repository" "registry" .Values.image.registry "repo" .Values.image.documentdb.repository "tag" "") }}"
         {{- end }}
-        {{- if .Values.image.documentdbCombined.repository }}
+        {{- /* Guarded: `helm upgrade --reuse-values` from a chart without this map leaves it unset. */}}
+        {{- $combined := .Values.image.documentdbCombined | default dict }}
+        {{- if $combined.repository }}
         - name: DOCUMENTDB_COMBINED_IMAGE_REPO
-          value: "{{ include "documentdb.imageRef" (dict "name" "image.documentdbCombined.repository" "registry" .Values.image.registry "repo" .Values.image.documentdbCombined.repository "tag" "") }}"
+          value: "{{ include "documentdb.imageRef" (dict "name" "image.documentdbCombined.repository" "registry" .Values.image.registry "repo" $combined.repository "tag" "") }}"
         {{- end }}
         {{- if .Values.imageMode }}
         {{- if not (has .Values.imageMode (list "auto" "imageVolume" "combined")) }}

@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/version"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -54,7 +55,9 @@ var (
 	apiSupported = func(_ *corev1.Pod) error { return nil }
 	apiRejects   = func(pod *corev1.Pod) error {
 		if hasImageVolumeSource(pod) {
-			return errors.New("spec.volumes[0].image: Forbidden: image volumes are disabled by feature-gate")
+			return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+				field.Forbidden(field.NewPath("spec", "volumes").Index(0).Child("image"), "image volumes are disabled by feature-gate"),
+			})
 		}
 		return nil
 	}
@@ -64,7 +67,19 @@ var (
 		}
 		return nil
 	}
-	apiBlocksAll = func(_ *corev1.Pod) error { return errors.New("exceeded quota") }
+	apiBlocksAll = func(_ *corev1.Pod) error {
+		return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("exceeded quota"))
+	}
+	// failOn makes the baseline (image=false) or image-volume (image=true) probe
+	// request fail with err and admits the other one.
+	failOn = func(image bool, err error) func(*corev1.Pod) error {
+		return func(pod *corev1.Pod) error {
+			if hasImageVolumeSource(pod) == image {
+				return err
+			}
+			return nil
+		}
+	}
 )
 
 func node(name, runtime string, unschedulable bool) corev1.Node {
@@ -156,7 +171,9 @@ var _ = Describe("ConfiguredMode", func() {
 var _ = Describe("ProbeAPI", func() {
 	DescribeTable("interprets the differential dry-run",
 		func(createFn func(*corev1.Pod) error, expected ProbeResult) {
-			Expect(ProbeAPI(context.Background(), probeClient(createFn), "default")).To(Equal(expected))
+			result, err := ProbeAPI(context.Background(), probeClient(createFn), "default")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(expected))
 		},
 		Entry("both pods admitted", apiSupported, ProbeSupported),
 		Entry("image pod rejected", apiRejects, ProbeUnsupported),
@@ -164,9 +181,22 @@ var _ = Describe("ProbeAPI", func() {
 		Entry("baseline rejected", apiBlocksAll, ProbeInconclusive),
 	)
 
+	DescribeTable("returns retryable failures of either request as errors",
+		func(createFn func(*corev1.Pod) error) {
+			_, err := ProbeAPI(context.Background(), probeClient(createFn), "default")
+			Expect(err).To(HaveOccurred())
+		},
+		Entry("baseline timeout", failOn(false, apierrors.NewTimeoutError("etcd slow", 1))),
+		Entry("image timeout", failOn(true, apierrors.NewTimeoutError("etcd slow", 1))),
+		Entry("image throttled", failOn(true, apierrors.NewTooManyRequests("slow down", 1))),
+		Entry("image server error", failOn(true, apierrors.NewInternalError(errors.New("boom")))),
+		Entry("baseline transport error", failOn(false, errors.New("connection refused"))),
+	)
+
 	It("submits probe pods that satisfy the restricted Pod Security profile", func() {
 		var seen *corev1.Pod
-		ProbeAPI(context.Background(), probeClient(func(p *corev1.Pod) error { seen = p; return nil }), "default")
+		_, err := ProbeAPI(context.Background(), probeClient(func(p *corev1.Pod) error { seen = p; return nil }), "default")
+		Expect(err).NotTo(HaveOccurred())
 		Expect(seen).NotTo(BeNil())
 		Expect(*seen.Spec.SecurityContext.RunAsNonRoot).To(BeTrue())
 		Expect(seen.Spec.SecurityContext.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeRuntimeDefault))
@@ -217,6 +247,17 @@ var _ = Describe("Detector", func() {
 		_, _, err := d.Detect(context.Background(), "default")
 		Expect(err).To(MatchError(ContainSubstring("connection refused")))
 	})
+
+	DescribeTable("returns an error instead of a mode when a probe request fails transiently",
+		func(createFn func(*corev1.Pod) error) {
+			d := &Detector{Client: probeClient(createFn), Clientset: clientset("34", newNode)}
+			mode, _, err := d.Detect(context.Background(), "default")
+			Expect(err).To(MatchError(ContainSubstring("probing image volume support")))
+			Expect(mode).To(BeEmpty())
+		},
+		Entry("baseline timeout", failOn(false, apierrors.NewTimeoutError("etcd slow", 1))),
+		Entry("image timeout", failOn(true, apierrors.NewTimeoutError("etcd slow", 1))),
+	)
 
 	DescribeTable("honours a forced mode without probing",
 		func(value string, expected Mode) {

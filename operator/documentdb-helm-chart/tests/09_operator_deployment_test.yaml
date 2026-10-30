@@ -213,6 +213,25 @@ tests:
             name: DOCUMENTDB_IMAGE_MODE
             value: "combined"
 
+  # `helm upgrade --reuse-values` from a chart released before imageMode keeps
+  # the old values, which have neither key; the operator then defaults to auto.
+  - it: should render values from a release without imageMode or image.documentdbCombined
+    set:
+      imageMode: null
+      image.documentdbCombined: null
+    asserts:
+      - notFailedTemplate: {}
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DOCUMENTDB_COMBINED_IMAGE_REPO
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DOCUMENTDB_IMAGE_MODE
+          any: true
+
   - it: should reject an invalid image mode
     set:
       imageMode: bogus

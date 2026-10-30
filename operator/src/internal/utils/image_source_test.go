@@ -56,7 +56,7 @@ func TestCombinedImage(t *testing.T) {
 	}{
 		{"explicit versioned", "ghcr.io/documentdb/documentdb-kubernetes-operator/documentdb:1.0.0", "0.117.0", "", repo + "1.0.0"},
 		{"explicit with registry port", "localhost:5000/documentdb:0.117.0", "", "", repo + "0.117.0"},
-		{"explicit tag and digest", "ghcr.io/x/documentdb:1.1.0@sha256:abc", "", "", repo + "1.1.0"},
+		{"tag and digest ignores the tag, as admission does", "ghcr.io/x/documentdb:1.1.0@sha256:abc", "0.117.0", "", repo + "0.117.0"},
 		{"explicit RC tag", "ghcr.io/x/documentdb:1.0-RC2", "", "", repo + "1.0-RC2"},
 		{"explicit digest only uses spec version", "ghcr.io/x/documentdb@sha256:abc", "0.117.0", "", repo + "0.117.0"},
 		{"explicit non-version tag uses env version", "ghcr.io/x/documentdb:latest", "", "1.0.0", repo + "1.0.0"},
