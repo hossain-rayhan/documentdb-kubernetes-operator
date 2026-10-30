@@ -89,7 +89,7 @@ jobs:
             echo "Failed to extract current default version from operator/src/internal/utils/constants.go" >&2
             exit 1
           fi
-          echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "current_version=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "Current default version: $CURRENT"
 
       - name: Update version references

@@ -364,20 +364,20 @@ jobs:
         TAG=${{ matrix.image.tag_prefix }}${{ env.IMAGE_TAG }}-${{ matrix.arch }}
         IMAGE="$IMAGE_REPOSITORY/${{ matrix.image.name }}:$TAG"
 
-        BUILD_ARGS=""
+        BUILD_ARGS=()
 
         case "${{ matrix.image.name }}" in
           documentdb|documentdb-combined)
             echo "Using deb: $DEB_PACKAGE_REL_PATH"
-            BUILD_ARGS="--build-arg PG_MAJOR=${{ env.DOCUMENTDB_PG_MAJOR }} --build-arg DEB_PACKAGE_REL_PATH=$DEB_PACKAGE_REL_PATH"
+            BUILD_ARGS=(--build-arg "PG_MAJOR=${{ env.DOCUMENTDB_PG_MAJOR }}" --build-arg "DEB_PACKAGE_REL_PATH=$DEB_PACKAGE_REL_PATH")
             ;;
           gateway)
             echo "Using public gateway source image: ${{ needs.resolve-public-artifacts.outputs.gateway_source_image }}"
-            BUILD_ARGS="--build-arg SOURCE_IMAGE=${{ needs.resolve-public-artifacts.outputs.gateway_source_image }}"
+            BUILD_ARGS=(--build-arg "SOURCE_IMAGE=${{ needs.resolve-public-artifacts.outputs.gateway_source_image }}")
             ;;
         esac
 
-        docker build --pull $BUILD_ARGS \
+        docker build --pull "${BUILD_ARGS[@]}" \
           --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
           --label "org.opencontainers.image.revision=${{ github.sha }}" \
           -t "$IMAGE" \

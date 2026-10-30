@@ -156,7 +156,7 @@ jobs:
 
       - name: Set chart version
         run: |
-            echo "CHART_VERSION=${{ inputs.version }}" >> $GITHUB_ENV
+            echo "CHART_VERSION=${{ inputs.version }}" >> "$GITHUB_ENV"
             echo "Using chart version: ${{ inputs.version }}"
 
       - name: Update Chart.yaml metadata
@@ -178,7 +178,7 @@ jobs:
       - name: Package Helm chart
         run: |
           helm dependency update operator/documentdb-helm-chart
-          helm package $CHART_NAME --version $CHART_VERSION
+          helm package "$CHART_NAME" --version "$CHART_VERSION"
 
       - name: Log in to GHCR
         run: |
@@ -186,17 +186,19 @@ jobs:
 
       - name: Push Helm chart to GHCR
         run: |
-          CHART_FILE=$(ls documentdb-operator-${CHART_VERSION}.tgz 2>/dev/null || ls */documentdb-operator-${CHART_VERSION}.tgz 2>/dev/null)
-          helm push "$CHART_FILE" oci://${GHCR_REPO}
+          CHART_FILE=$(ls "documentdb-operator-${CHART_VERSION}.tgz" 2>/dev/null || ls ./*/"documentdb-operator-${CHART_VERSION}.tgz" 2>/dev/null)
+          helm push "$CHART_FILE" "oci://${GHCR_REPO}"
 
       - name: Release summary
         run: |
-          echo "## Operator Release Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Operator Version**: \`$CHART_VERSION\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Images Promoted**: operator, sidecar" >> $GITHUB_STEP_SUMMARY
-          echo "- **Source Tag**: \`${{ inputs.candidate_version }}\` → \`${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Chart Source Ref**: \`${{ inputs.source_ref }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Registry**: \`$GHCR_REPO\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Note**: Database images (documentdb, gateway) are released independently via \`release_documentdb_images.yml\`." >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Operator Release Summary"
+            echo ""
+            echo "- **Operator Version**: \`$CHART_VERSION\`"
+            echo "- **Images Promoted**: operator, sidecar"
+            echo "- **Source Tag**: \`${{ inputs.candidate_version }}\` → \`${{ inputs.version }}\`"
+            echo "- **Chart Source Ref**: \`${{ inputs.source_ref }}\`"
+            echo "- **Registry**: \`$GHCR_REPO\`"
+            echo ""
+            echo "**Note**: Database images (documentdb, gateway) are released independently via \`release_documentdb_images.yml\`."
+          } >> "$GITHUB_STEP_SUMMARY"
