@@ -84,6 +84,7 @@ jobs:
     uses: ./.github/workflows/test-build-and-package.yml
     with:
       version: '0.2.0'
+      build_combined: true
     secrets: inherit
 
   # ---------------------------------------------------------------------------
@@ -619,15 +620,19 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Combined-image fallback: with ImageVolume unusable, the default
-  # imageMode=auto must run PostgreSQL from the PUBLISHED combined image
-  # (documentdb-combined:18-<chart documentDbVersion>) and the node must pull
-  # the variant for its own architecture. Rows cover both detection paths:
-  # the API gate disabled (amd64 + arm64) and a node runtime without image
-  # volume support (containerd 1.7 in kindest/node:v1.32.0).
+  # imageMode=auto must run PostgreSQL from the combined image for the node's
+  # architecture. Rows cover both detection paths (API gate disabled, and a
+  # node runtime without image volume support: containerd 1.7 in
+  # kindest/node:v1.32.0) and both image sources:
   #
-  # The DocumentDB pins spec.documentDBVersion to the chart's documentDbVersion
-  # because CI tags database images per run (<version>-test-<run_id>), and no
-  # combined image exists for those tags.
+  #   published  The DocumentDB pins spec.documentDBVersion to the chart's
+  #              documentDbVersion, so the node pulls the released multi-arch
+  #              documentdb-combined:18-<version> from GHCR. (CI tags database
+  #              images per run, and no combined image exists for those tags.)
+  #   pr-built   The combined image built from this checkout's
+  #              Dockerfile_combined (build-combined in test-build-and-package)
+  #              is loaded into kind, and the DocumentDB uses the CI documentdb
+  #              image, whose tag the operator reuses for the combined image.
   # ---------------------------------------------------------------------------
   combined-image:
     name: Combined image (${{ matrix.architecture }}, ${{ matrix.case }})
@@ -639,22 +644,32 @@ jobs:
         include:
           - architecture: amd64
             runner: ubuntu-22.04
-            case: k8s v1.33.7, ImageVolume gate off
-            scenario: combined-gate-off
+            image_source: published
+            case: published image, k8s v1.33.7, ImageVolume gate off
+            scenario: combined-published
             kubernetes_version: v1.33.7
             feature_gates: 'ImageVolume=false'
           - architecture: arm64
             runner: ubuntu-22.04-arm
-            case: k8s v1.33.7, ImageVolume gate off
-            scenario: combined-gate-off
+            image_source: published
+            case: published image, k8s v1.33.7, ImageVolume gate off
+            scenario: combined-published
             kubernetes_version: v1.33.7
             feature_gates: 'ImageVolume=false'
           - architecture: amd64
             runner: ubuntu-22.04
-            case: k8s v1.32.0, containerd 1.7
-            scenario: combined-containerd17
+            image_source: pr-built
+            case: PR-built image, k8s v1.32.0, containerd 1.7
+            scenario: combined-pr-containerd17
             kubernetes_version: v1.32.0
             feature_gates: ''
+          - architecture: arm64
+            runner: ubuntu-22.04-arm
+            image_source: pr-built
+            case: PR-built image, k8s v1.33.7, ImageVolume gate off
+            scenario: combined-pr-gate-off
+            kubernetes_version: v1.33.7
+            feature_gates: 'ImageVolume=false'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -703,24 +718,53 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository-owner: ${{ github.repository_owner }}
 
-      - name: Resolve the published combined image
+      - name: Download PR-built combined image
+        if: matrix.image_source == 'pr-built'
+        uses: actions/download-artifact@v4
+        with:
+          name: build-docker-documentdb-combined-${{ matrix.architecture }}
+          path: ./artifacts/build-docker-documentdb-combined
+
+      - name: Resolve the expected combined image
         shell: bash
+        env:
+          ARCH: ${{ matrix.architecture }}
+          IMAGE_SOURCE: ${{ matrix.image_source }}
+          KIND_CLUSTER: documentdb-e2e-${{ matrix.architecture }}-${{ matrix.scenario }}
         run: |
           set -euo pipefail
-          VERSION=$(grep -E '^documentDbVersion:' operator/documentdb-helm-chart/values.yaml \
-            | sed -E 's/^documentDbVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/')
-          IMAGE="ghcr.io/documentdb/documentdb-kubernetes-operator/documentdb-combined:18-${VERSION}"
-          echo "Expected combined image: ${IMAGE} (linux/${{ matrix.architecture }})"
-          if ! docker buildx imagetools inspect --raw "${IMAGE}" \
-              | jq -e --arg arch "${{ matrix.architecture }}" \
-                '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)' >/dev/null; then
-            echo "::error::${IMAGE} is not published for linux/${{ matrix.architecture }}"
-            exit 1
+          REPO=ghcr.io/documentdb/documentdb-kubernetes-operator/documentdb-combined
+          if [[ "$IMAGE_SOURCE" == "published" ]]; then
+            VERSION=$(grep -E '^documentDbVersion:' operator/documentdb-helm-chart/values.yaml \
+              | sed -E 's/^documentDbVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/')
+            IMAGE="${REPO}:18-${VERSION}"
+            if ! docker buildx imagetools inspect --raw "${IMAGE}" \
+                | jq -e --arg arch "$ARCH" \
+                  '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)' >/dev/null; then
+              echo "::error::${IMAGE} is not published for linux/${ARCH}"
+              exit 1
+            fi
+            # Pin the version so the operator resolves the released combined tag.
+            SPEC_IMAGES="documentDBVersion: \"${VERSION}\""
+          else
+            VERSION="${EXT_IMAGE_TAG}"
+            IMAGE="${REPO}:18-${EXT_IMAGE_TAG}-${ARCH}"
+            TAR=./artifacts/build-docker-documentdb-combined/documentdb-combined-${ARCH}-image.tar
+            if [[ ! -f "$TAR" ]]; then
+              echo "::error::PR-built combined image artifact is missing; see the 'Build Combined Images' job"
+              exit 1
+            fi
+            docker load < "$TAR"
+            kind load docker-image "${IMAGE}" --name "${KIND_CLUSTER}"
+            # The operator reuses the release tag of spec.image.documentDB for
+            # the combined image, which resolves to the loaded image.
+            SPEC_IMAGES="image: {documentDB: \"${DOCUMENTDB_IMAGE_RESOLVED}\", gateway: \"${GATEWAY_IMAGE_RESOLVED}\"}"
           fi
+          echo "Expected combined image: ${IMAGE} (linux/${ARCH})"
           {
-            echo "DOCDB_VERSION=${VERSION}"
             echo "EXPECTED_IMAGE=${IMAGE}"
-            # X.Y.Z -> X.Y-Z (pg_extension version)
+            echo "SPEC_IMAGES=${SPEC_IMAGES}"
+            # X.Y.Z[-suffix] -> X.Y-Z (pg_extension version)
             echo "EXPECTED_EXT_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+)\.([0-9]+).*/\1-\2/')"
           } >> "$GITHUB_ENV"
 
@@ -737,7 +781,7 @@ jobs:
           spec:
             nodeCount: 1
             instancesPerNode: 1
-            documentDBVersion: "${DOCDB_VERSION}"
+            ${SPEC_IMAGES}
             resource:
               storage:
                 pvcSize: 5Gi

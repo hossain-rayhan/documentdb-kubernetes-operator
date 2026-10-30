@@ -35,6 +35,14 @@ check() {
 
 cnpg() { kubectl -n "$DB_NS" get clusters.postgresql.cnpg.io "$DB_NAME" -o jsonpath="$1"; }
 
+# Fail fast: the "no image volumes" checks compare against "" and would pass
+# vacuously if the objects were missing.
+if ! kubectl -n "$DB_NS" get clusters.postgresql.cnpg.io "$DB_NAME" >/dev/null || \
+   ! kubectl -n "$DB_NS" get pod "$POD" >/dev/null; then
+  echo "❌ CNPG Cluster $DB_NAME or pod $POD not found in $DB_NS"
+  exit 1
+fi
+
 echo "== Image mode selected by the operator"
 kubectl -n "$DB_NS" get events --field-selector reason=ImageModeSelected \
   -o jsonpath='{range .items[*]}{.message}{"\n"}{end}'
