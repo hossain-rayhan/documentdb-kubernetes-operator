@@ -579,22 +579,50 @@ func CombinedImageRepo() string {
 	return envOr(DOCUMENTDB_COMBINED_IMAGE_REPO_ENV, DOCUMENTDB_COMBINED_IMAGE_REPO)
 }
 
-// combinedVersionTagPattern matches tags that name a DocumentDB release
-// (e.g. "1.0.0", "0.117.0", "1.0-RC2"), as opposed to "latest" or the
-// change-stream tags, which have no combined counterpart.
-var combinedVersionTagPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+`)
+var rcImageTagPattern = regexp.MustCompile(`^[vV]?([0-9]+)\.([0-9]+)-[rR][cC][1-9][0-9]*(?:$|[-+])`)
+
+// ExtractSemver returns the leading "X.Y.Z" portion from a tag string,
+// normalizing "X.Y-RC<n>" tags to the extension version "X.Y.0".
+// It returns "" when neither version format is recognized.
+func ExtractSemver(tag string) string {
+	if matches := rcImageTagPattern.FindStringSubmatch(tag); matches != nil {
+		return matches[1] + "." + matches[2] + ".0"
+	}
+	// Match digits.digits.digits at start of string
+	parts := strings.SplitN(tag, ".", 3)
+	if len(parts) < 3 {
+		return ""
+	}
+	// Validate major and minor are numeric
+	if _, err := strconv.Atoi(parts[0]); err != nil {
+		return ""
+	}
+	if _, err := strconv.Atoi(parts[1]); err != nil {
+		return ""
+	}
+	// Third part may have a suffix (e.g., "0-amd64"), take only leading digits
+	thirdPart := parts[2]
+	i := 0
+	for i < len(thirdPart) && thirdPart[i] >= '0' && thirdPart[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return ""
+	}
+	return parts[0] + "." + parts[1] + "." + thirdPart[:i]
+}
 
 // CombinedImage returns the combined PostgreSQL + DocumentDB image for a
 // cluster: <combined repo>:<pg major>-<version>. The version is the
-// ReleaseVersionTag of an explicit extension image when that tag names a
-// release, otherwise the first non-empty of specVersion, envVersion, and
+// ReleaseVersionTag of an explicit extension image when ExtractSemver
+// recognizes it as a release, otherwise the first non-empty of specVersion, envVersion, and
 // DEFAULT_DOCUMENTDB_TAG. This is the same precedence admission uses to
 // resolve the binary version, so the schema and rollback checks validate the
 // version that actually runs. Only the version is carried over; the
 // repository always comes from CombinedImageRepo.
 func CombinedImage(explicitExtensionImage, specVersion, envVersion string) string {
 	version := ReleaseVersionTag(explicitExtensionImage)
-	if !combinedVersionTagPattern.MatchString(version) {
+	if ExtractSemver(version) == "" {
 		version = specVersion
 	}
 	if version == "" {

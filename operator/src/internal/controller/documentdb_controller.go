@@ -60,6 +60,10 @@ type DocumentDBReconciler struct {
 
 var reconcileMutex sync.Mutex
 
+// Package-level RBAC: the image-mode detector lists nodes to check container
+// runtime support for image volumes.
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
+
 // engine returns the product-neutral reconciler bound to this reconciler's
 // clients. It is built per call so struct-literal construction (as in tests)
 // keeps working.
@@ -83,7 +87,6 @@ func (r *DocumentDBReconciler) engine() *engine.ClusterReconciler[*dbpreview.Doc
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
 func (r *DocumentDBReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	return r.engine().Reconcile(ctx, req)
 }

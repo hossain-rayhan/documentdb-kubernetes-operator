@@ -14,6 +14,7 @@ import (
 
 	"github.com/documentdb/documentdb-operator/internal/imagemode"
 	"github.com/documentdb/documentdb-operator/internal/product"
+	util "github.com/documentdb/documentdb-operator/internal/utils"
 )
 
 var _ = Describe("Combined image mode", func() {
@@ -32,6 +33,23 @@ var _ = Describe("Combined image mode", func() {
 		Expect(IsCombinedImageMode(cluster)).To(BeFalse())
 		cluster.Annotations[imagemode.AnnotationKey] = string(imagemode.Combined)
 		Expect(IsCombinedImageMode(cluster)).To(BeTrue())
+	})
+
+	It("still recognizes a combined cluster whose annotation was removed", func() {
+		cluster := baseCluster("c", "ns")
+		ApplyCombinedImageMode(cluster, product.Images{Combined: util.CombinedImageRepo() + ":18-1.0.0"})
+		Expect(cluster.Annotations).NotTo(HaveKey(imagemode.AnnotationKey))
+		Expect(IsCombinedImageMode(cluster)).To(BeTrue())
+
+		// An explicit imageVolume annotation always wins.
+		cluster.Annotations = map[string]string{imagemode.AnnotationKey: string(imagemode.ImageVolume)}
+		Expect(IsCombinedImageMode(cluster)).To(BeFalse())
+
+		// 0.1.x clusters ran documentdb-local without an extension entry.
+		legacy := baseCluster("c", "ns")
+		legacy.Spec.PostgresConfiguration.Extensions = nil
+		legacy.Spec.ImageName = "ghcr.io/microsoft/documentdb/documentdb-local:16"
+		Expect(IsCombinedImageMode(legacy)).To(BeFalse())
 	})
 
 	It("runs PostgreSQL from the combined image without extension volumes", func() {

@@ -87,23 +87,32 @@ func RuntimeSupportsImageVolume(runtimeVersion string) bool {
 	return major > minVersion[0] || (major == minVersion[0] && minor >= minVersion[1])
 }
 
-// CheckNodes reports whether every schedulable node runs a container runtime
-// that supports image volumes. The reason explains a negative result.
+// CheckNodes reports whether every node that can run PostgreSQL pods runs a
+// container runtime that supports image volumes. Only schedulable Linux nodes
+// that already report a runtime version are checked: Windows nodes never run
+// PostgreSQL, and nodes still registering have no runtime version yet. When no
+// node qualifies (scale-to-zero pools, all nodes cordoned during an upgrade),
+// the runtime cannot be judged, so CheckNodes returns true with a non-empty
+// note and the caller decides from the API server alone. A false result
+// carries the reason.
 func CheckNodes(nodes []corev1.Node) (bool, string) {
-	schedulable := 0
+	checked := 0
 	for i := range nodes {
 		node := &nodes[i]
-		if node.Spec.Unschedulable {
+		runtime := node.Status.NodeInfo.ContainerRuntimeVersion
+		if node.Spec.Unschedulable || runtime == "" {
 			continue
 		}
-		schedulable++
-		runtime := node.Status.NodeInfo.ContainerRuntimeVersion
+		if nodeOS, ok := node.Labels[corev1.LabelOSStable]; ok && nodeOS != "linux" {
+			continue
+		}
+		checked++
 		if !RuntimeSupportsImageVolume(runtime) {
 			return false, fmt.Sprintf("node %q runs container runtime %q; image volumes need containerd >= 2.1 or CRI-O >= 1.33", node.Name, runtime)
 		}
 	}
-	if schedulable == 0 {
-		return false, "no schedulable nodes found to verify container runtime support for image volumes"
+	if checked == 0 {
+		return true, "no schedulable Linux node reports a container runtime yet, so runtime support was not verified"
 	}
 	return true, ""
 }
@@ -147,8 +156,9 @@ func (d *Detector) Detect(ctx context.Context, namespace string) (Mode, string, 
 	if err != nil {
 		return "", "", fmt.Errorf("listing nodes to detect image volume support: %w", err)
 	}
-	if ok, reason := CheckNodes(nodes.Items); !ok {
-		return Combined, reason, nil
+	nodesOK, nodeNote := CheckNodes(nodes.Items)
+	if !nodesOK {
+		return Combined, nodeNote, nil
 	}
 
 	result, err := ProbeAPI(ctx, d.Client, namespace)
@@ -157,6 +167,9 @@ func (d *Detector) Detect(ctx context.Context, namespace string) (Mode, string, 
 	}
 	switch result {
 	case ProbeSupported:
+		if nodeNote != "" {
+			return ImageVolume, "the API server supports image volumes; " + nodeNote, nil
+		}
 		return ImageVolume, "all node container runtimes and the API server support image volumes", nil
 	case ProbeUnsupported:
 		return Combined, "the API server does not accept image volumes (ImageVolume feature gate disabled)", nil

@@ -43,9 +43,3 @@ func (v *DocumentDBValidator) ensureImageVolumeSupported(ctx context.Context, na
 	}
 	return nil
 }
-
-// probeImageVolume performs the differential dry-run probe. The second return
-// value reports whether the result is conclusive.
-func (v *DocumentDBValidator) probeImageVolume(ctx context.Context, namespace string) (supported bool, conclusive bool) {
-	return v.imageVolumeProbe().Probe(ctx, namespace)
-}

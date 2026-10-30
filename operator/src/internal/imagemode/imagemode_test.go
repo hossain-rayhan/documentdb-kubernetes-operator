@@ -148,9 +148,19 @@ var _ = Describe("CheckNodes", func() {
 		Expect(ok).To(BeTrue())
 	})
 
-	It("fails when no schedulable node exists", func() {
-		ok, _ := CheckNodes([]corev1.Node{node("old", "containerd://2.1.3", true)})
-		Expect(ok).To(BeFalse())
+	It("does not decide when no schedulable node can be checked", func() {
+		ok, note := CheckNodes([]corev1.Node{node("cordoned", "containerd://1.7.24", true)})
+		Expect(ok).To(BeTrue())
+		Expect(note).To(ContainSubstring("not verified"))
+	})
+
+	It("ignores Windows nodes and nodes that have not reported a runtime yet", func() {
+		windows := node("win", "containerd://1.7.20+azure", false)
+		windows.Labels = map[string]string{corev1.LabelOSStable: "windows"}
+		registering := node("new", "", false)
+		ok, note := CheckNodes([]corev1.Node{windows, registering, node("linux", "containerd://2.1.3", false)})
+		Expect(ok).To(BeTrue())
+		Expect(note).To(BeEmpty())
 	})
 })
 
@@ -191,9 +201,10 @@ var _ = Describe("ProbeAPI", func() {
 		Entry("image throttled", failOn(true, apierrors.NewTooManyRequests("slow down", 1))),
 		Entry("image server error", failOn(true, apierrors.NewInternalError(errors.New("boom")))),
 		Entry("baseline transport error", failOn(false, errors.New("connection refused"))),
+		Entry("baseline unauthorized (expired token)", failOn(false, apierrors.NewUnauthorized("token expired"))),
 	)
 
-	It("submits probe pods that satisfy the restricted Pod Security profile", func() {
+	It("submits probe pods that satisfy the restricted Pod Security profile and quotas requiring limits", func() {
 		var seen *corev1.Pod
 		_, err := ProbeAPI(context.Background(), probeClient(func(p *corev1.Pod) error { seen = p; return nil }), "default")
 		Expect(err).NotTo(HaveOccurred())
@@ -202,6 +213,12 @@ var _ = Describe("ProbeAPI", func() {
 		Expect(seen.Spec.SecurityContext.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeRuntimeDefault))
 		Expect(*seen.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
 		Expect(seen.Spec.Containers[0].SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
+		// Namespaces whose quota or policy requires requests/limits must admit it.
+		res := seen.Spec.Containers[0].Resources
+		Expect(res.Requests).To(HaveKey(corev1.ResourceCPU))
+		Expect(res.Requests).To(HaveKey(corev1.ResourceMemory))
+		Expect(res.Limits).To(HaveKey(corev1.ResourceCPU))
+		Expect(res.Limits).To(HaveKey(corev1.ResourceMemory))
 	})
 })
 
@@ -220,7 +237,8 @@ var _ = Describe("Detector", func() {
 		Entry("new runtime + API supported", clientset("35", newNode), apiSupported, ImageVolume),
 		Entry("new runtime + API gate off", clientset("34", newNode), apiPrunes, Combined),
 		Entry("old runtime even when API supports it", clientset("35", oldNode), apiSupported, Combined),
-		Entry("no nodes", clientset("35"), apiSupported, Combined),
+		Entry("no nodes defers to the API server", clientset("35"), apiSupported, ImageVolume),
+		Entry("no nodes and API gate off", clientset("34"), apiPrunes, Combined),
 		Entry("inconclusive probe on 1.35", clientset("35", newNode), apiBlocksAll, ImageVolume),
 		Entry("inconclusive probe on 1.35+ (vendor minor)", clientset("35+", newNode), apiBlocksAll, ImageVolume),
 		Entry("inconclusive probe on 1.34", clientset("34", newNode), apiBlocksAll, Combined),

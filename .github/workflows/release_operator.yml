@@ -66,11 +66,50 @@ jobs:
         run: bash .github/scripts/verify-e2e-passed.sh
 
   # ---------------------------------------------------------------------------
+  # Verify the combined PostgreSQL + DocumentDB image for the chart's default
+  # documentDbVersion is published and public. The operator falls back to it
+  # (imageMode=auto) on clusters without ImageVolume; releasing the operator
+  # before it exists would leave those clusters stuck pulling a missing image.
+  # The inspect runs without logging in, so a private package also fails.
+  # ---------------------------------------------------------------------------
+  verify-combined-image:
+    name: Verify combined image is published
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout values.yaml
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          sparse-checkout: |
+            operator/documentdb-helm-chart/values.yaml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Inspect combined image anonymously
+        env:
+          FORCE: ${{ inputs.force }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          DOCDB_VERSION=$(grep '^documentDbVersion:' operator/documentdb-helm-chart/values.yaml | sed 's/.*"\(.*\)".*/\1/')
+          IMAGE="ghcr.io/${REPO}/documentdb-combined:18-${DOCDB_VERSION}"
+          echo "Checking ${IMAGE}"
+          if docker buildx imagetools inspect "${IMAGE}" >/dev/null; then
+            echo "✓ ${IMAGE} is published and public"
+          elif [[ "${FORCE}" == "true" ]]; then
+            echo "::warning::${IMAGE} is missing or private; continuing because force=true"
+          else
+            echo "::error::${IMAGE} is missing or not public. Build it with 'RELEASE - Build DocumentDB Candidate Images', promote the combined tag, and make the package public before releasing the operator."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
   # Promote operator and sidecar images (retag candidate → release)
   # ---------------------------------------------------------------------------
   promote-operator-images:
     name: Promote ${{ matrix.image }}
-    needs: verify-e2e-passed
+    needs: [verify-e2e-passed, verify-combined-image]
     runs-on: ubuntu-latest
     strategy:
       matrix:

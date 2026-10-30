@@ -917,6 +917,8 @@ var _ = Describe("combined image version agrees with admission", func() {
 		Entry("digest only falls back to version", "1.0.0", "ghcr.io/documentdb/documentdb"+digest),
 		Entry("non-release tag falls back to version", "1.0.0", "ghcr.io/documentdb/documentdb:latest"),
 		Entry("RC tag", "", "ghcr.io/documentdb/documentdb:1.0-RC2"),
+		Entry("two-part tag falls back to version", "0.112.0", "ghcr.io/documentdb/documentdb:0.110"),
+		Entry("schema-style tag falls back to version", "0.112.0", "ghcr.io/documentdb/documentdb:0.110-0"),
 	)
 
 	It("blocks a tag-plus-digest rollback that combined mode would otherwise run", func() {

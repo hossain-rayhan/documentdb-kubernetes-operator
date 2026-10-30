@@ -68,29 +68,37 @@ The operator-level setting `DOCUMENTDB_IMAGE_MODE` (Helm `imageMode`) accepts:
 Detection runs **once, when the CNPG `Cluster` is first created**:
 
 1. **Node runtimes.** List nodes (uncached) and parse
-   `status.nodeInfo.containerRuntimeVersion` of every schedulable node
-   (`spec.unschedulable` false). Every node must report containerd ≥ 2.1 or
-   CRI-O ≥ 1.33. Any other runtime, an unparsable version, an empty node list,
-   or a `Forbidden` list error selects `combined`.
+   `status.nodeInfo.containerRuntimeVersion` of every schedulable Linux node
+   that already reports a runtime (`spec.unschedulable` false; Windows nodes
+   and nodes still registering are skipped). Every such node must report
+   containerd ≥ 2.1 or CRI-O ≥ 1.33; any other runtime, an unparsable version,
+   or a `Forbidden` list error selects `combined`. When no node qualifies
+   (scale-to-zero pools, all nodes cordoned during an upgrade), the runtime is
+   not judged and the API server decides alone; the event reason says so.
 2. **API server.** Run the existing differential server-side dry-run probe
    (a baseline `emptyDir` pod vs. an `image` volume pod). The probe pods carry a
-   restricted-profile security context so Pod Security Admission does not make
-   the probe inconclusive.
+   restricted-profile security context and minimal CPU/memory requests and
+   limits, so Pod Security Admission and quotas or policies that require limits
+   do not make the probe inconclusive. Only a definitive 4xx rejection counts;
+   timeouts, throttling, `401`, server and transport errors are retried.
    - supported → `imageVolume`
    - unsupported → `combined`
    - inconclusive (quota, another webhook) → `imageVolume` when the server
      version is ≥ 1.35 (ImageVolume GA), otherwise `combined`.
 
 `combined` is the safe default: it works on every runtime. Because the mode is
-permanent, transient failures (a node list error other than `Forbidden`, or an
-unreadable server version after an inconclusive probe) do not pick a mode: the
-operator requeues and retries before creating the CNPG cluster.
+permanent, transient failures (a node list error other than `Forbidden`, a
+retryable probe error, or an unreadable server version after an inconclusive
+probe) do not pick a mode: the operator requeues and retries before creating
+the CNPG cluster.
 
 ### Mode persistence
 
 The created CNPG cluster is annotated `documentdb.io/image-mode=<mode>`, and
 that annotation is the source of truth for **existing** clusters: only a cluster
-annotated `combined` is rendered in combined mode. Clusters without the
+annotated `combined` (or, if the annotation was removed, one that mounts no
+extension and runs an image from the combined repository) is rendered in
+combined mode. Clusters without the
 annotation (created by earlier operator versions) keep the ImageVolume
 rendering, so the operator never rewrites their `imageName` — in particular the
 0.1.x `documentdb-local:16` clusters, which have no extension entry, are not
@@ -109,6 +117,8 @@ also makes its existing events visible.)
 - Built from `.github/dockerfiles/Dockerfile_combined`: the CNPG
   `postgresql:18-minimal-trixie` base plus the same packages as the extension
   image (`pg_cron`, `pgvector`, `postgis`, and the pinned DocumentDB `.deb`).
+- Combined images exist from DocumentDB `1.0.0` on; clusters pinned to an older
+  `documentDBVersion` have no combined image.
 - Runs as the CNPG `postgres` user (UID 26), so no UID/GID override is needed.
 - The tag starts with the PostgreSQL major because CloudNativePG derives the
   major version from the tag (`^(\d\.?)+`); a bare `1.0.0` would read as
@@ -158,11 +168,17 @@ combined image.
 ## Pipelines
 
 - `build_documentdb_images.yml`: a third matrix image `documentdb-combined`
-  built from the same verified `.deb`, pushed as `18-<candidate>-<arch>`, then
-  merged, signed, and verified as `18-<candidate>`.
+  built from the same pinned and checksum-verified `.deb` (for RC/source builds,
+  the same pinned source and package version, compiled per image job), pushed
+  as `18-<candidate>-<arch>`, then merged, signed, and verified as
+  `18-<candidate>`.
 - `release_documentdb_images.yml`: promotes `documentdb-combined:18-<candidate>`
   to `18-<version>`. The version-bump PR needs no extra edits because the
   combined tag is derived from `DEFAULT_DOCUMENTDB_TAG`.
+- `release_operator.yml`: a `verify-combined-image` job anonymously inspects
+  `documentdb-combined:18-<documentDbVersion>` before promoting operator images,
+  so an operator release fails while the combined image for its default
+  version is missing or private (`force` bypasses it).
 
 ## Testing
 
@@ -197,6 +213,17 @@ combined image.
   ImageVolume layout (annotation and extension entry) was selected.
 
 ## Limitations and follow-ups
+
+- The combined image freezes its PostgreSQL 18 minor version and Debian base at
+  build time, while ImageVolume clusters follow the floating CNPG base tag.
+  Combined clusters pick up PostgreSQL and OS patches with the next DocumentDB
+  release (or a rebuild of the combined image).
+- Downgrading the operator below the release that introduces combined mode is
+  not supported for combined clusters: older operators render the ImageVolume
+  layout and their CNPG sync fails on the missing extension.
+- Clusters that an earlier operator created on a runtime without image volume
+  support (for example containerd 1.7 with the API gate on) keep the ImageVolume
+  layout and stay unhealthy; recreate them to get combined mode.
 
 - Mixed node pools: one unsupported schedulable node selects `combined` for the
   whole new cluster; detection does not consider the cluster's affinity.

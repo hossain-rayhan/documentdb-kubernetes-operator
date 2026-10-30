@@ -11,6 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,6 +38,12 @@ const probeImage = "registry.k8s.io/pause:3.10"
 
 // probeVolumeName is the volume/mount name shared by both probe Pods.
 const probeVolumeName = "probe"
+
+// probeResources are the minimal requests and limits of the probe container.
+var probeResources = corev1.ResourceList{
+	corev1.ResourceCPU:    resource.MustParse("10m"),
+	corev1.ResourceMemory: resource.MustParse("16Mi"),
+}
 
 // ProbeAPI performs a differential server-side dry-run to detect whether the
 // API server supports ImageVolume, without relying on error-string matching.
@@ -91,17 +98,17 @@ func ProbeAPI(ctx context.Context, c client.Client, namespace string) (ProbeResu
 
 // retryable reports whether a dry-run error says nothing about the API
 // server's capabilities or admission policy. Only a 4xx status other than
-// 408/429 (for example Invalid, Forbidden by Pod Security Admission or quota,
-// or BadRequest) is a definitive answer; timeouts, throttling, server errors
-// and errors without an API status (transport failures, context cancellation)
-// are retried.
+// 401/408/429 (for example Invalid, Forbidden by Pod Security Admission or
+// quota, or BadRequest) is a definitive answer; expired credentials, timeouts,
+// throttling, server errors and errors without an API status (transport
+// failures, context cancellation) are retried.
 func retryable(err error) bool {
 	var status apierrors.APIStatus
 	if !errors.As(err, &status) {
 		return true
 	}
 	code := status.Status().Code
-	return code == 0 || code == http.StatusRequestTimeout || code == http.StatusTooManyRequests ||
+	return code == 0 || code == http.StatusUnauthorized || code == http.StatusRequestTimeout || code == http.StatusTooManyRequests ||
 		code >= http.StatusInternalServerError
 }
 
@@ -138,6 +145,13 @@ func dryRunProbePod(ctx context.Context, c client.Client, namespace string, volu
 			Containers: []corev1.Container{{
 				Name:  "probe",
 				Image: probeImage,
+				// Requests and limits let the dry-run pass namespace quotas and
+				// policies that require them; otherwise the baseline is rejected
+				// and the probe is inconclusive.
+				Resources: corev1.ResourceRequirements{
+					Requests: probeResources,
+					Limits:   probeResources,
+				},
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: ptr.To(false),
 					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
