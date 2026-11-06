@@ -80,7 +80,7 @@ In a separate terminal, start the proxy and leave it running:
 az connectedk8s proxy --name <cluster-name> --resource-group <resource-group>
 ```
 
-The proxy adds a context for the cluster to your kubeconfig. In your first terminal, check that you can reach the cluster:
+The proxy adds the cluster to your default kubeconfig (`~/.kube/config`) and makes it the current context. The entry stays after you stop the proxy; switch back to another context with `kubectl config use-context <name>`. In your first terminal, check that you can reach the cluster:
 
 ```bash
 kubectl get nodes
@@ -95,11 +95,17 @@ moc-lqokfineo3i   Ready    control-plane   2d    v1.33.7
 ```
 
 !!! tip "If the proxy stops working"
-    Restart the `az connectedk8s proxy` command if `kubectl` reports errors such as `Unknown proxy error occurred`; the connection can drop on long sessions. Run only one proxy at a time. If a new proxy fails with `Failed to fetch public key info from client proxy`, a helper process from an earlier proxy is still running: stop it with `kill $(pgrep -f 'clientproxy/arcProxy')` and start the proxy again.
+    Restart the `az connectedk8s proxy` command if `kubectl` reports errors such as `Unknown proxy error occurred`; the connection can drop on long sessions. Run only one proxy at a time. After stopping the proxy with Ctrl+C, wait about 30 seconds before starting it again: its helper process takes a few seconds to exit. If a new proxy fails with `Failed to fetch public key info from client proxy`, a helper process from an earlier proxy is still running: stop it with `kill $(pgrep -f 'clientproxy/arcProxy')` and start the proxy again.
 
 ## Step 2: Install cert-manager
 
-The operator uses [cert-manager](https://cert-manager.io/) to manage TLS certificates. Skip this step if cert-manager is already installed (`kubectl get crd certificates.cert-manager.io` succeeds).
+The operator uses [cert-manager](https://cert-manager.io/) to manage TLS certificates. Check whether cert-manager is already running:
+
+```bash
+kubectl get deployment cert-manager -n cert-manager
+```
+
+If it shows `READY 1/1`, skip the installation below. Don't check for the cert-manager CRDs instead: they remain after cert-manager is uninstalled, and the operator installation fails (`context deadline exceeded`) when the CRDs exist but cert-manager isn't running. If the command reports `NotFound`, install cert-manager:
 
 ```bash
 helm repo add jetstack https://charts.jetstack.io --force-update
@@ -129,16 +135,22 @@ helm install documentdb-operator oci://ghcr.io/documentdb/documentdb-operator \
   --wait
 ```
 
-Check that the operator is ready:
+Check that the operator is ready. The DocumentDB operator runs in `documentdb-operator`; the CloudNativePG operator and the sidecar injector run in `cnpg-system`:
 
 ```bash
 kubectl get deployment -n documentdb-operator
+kubectl get deployment -n cnpg-system
 ```
 
 ```text
 NAME                  READY   UP-TO-DATE   AVAILABLE   AGE
 documentdb-operator   1/1     1            1           60s
+NAME                                 READY   UP-TO-DATE   AVAILABLE   AGE
+documentdb-operator-cloudnative-pg   1/1     1            1           60s
+sidecar-injector                     1/1     1            1           60s
 ```
+
+The `documentdb-operator` pod usually shows `RESTARTS 1` right after installation. It starts before cert-manager has issued its webhook certificate, exits, and starts cleanly once the certificate exists. This is expected.
 
 ## Step 4: Deploy a DocumentDB cluster
 
@@ -274,12 +286,21 @@ kubectl get pv | grep 'documentdb-ns/' | awk '$5=="Released"{print $1}' \
 
 The disk driver deletes the volumes within a minute or two; `kubectl get pv | grep 'documentdb-ns/'` then returns nothing. Don't use `kubectl delete pv` for this: with `Retain`, it removes only the Kubernetes object and leaves the disk on Azure Local.
 
-To remove the operator and cert-manager:
+To remove the operator and cert-manager, if nothing else on the cluster uses them:
 
 ```bash
 helm uninstall documentdb-operator -n documentdb-operator
 helm uninstall cert-manager -n cert-manager
 ```
+
+Helm leaves the `documentdb-operator` and `cert-manager` namespaces and the DocumentDB, CloudNativePG, and cert-manager CRDs in place. To remove them as well, first check with the cluster owner that no other workloads use DocumentDB, CloudNativePG, or cert-manager: deleting a CRD deletes every resource of that type in the cluster.
+
+```bash
+kubectl delete namespace documentdb-operator cert-manager
+kubectl get crd -o name | grep -E 'documentdb\.io|cnpg\.io|cert-manager\.io' | xargs -r kubectl delete
+```
+
+Stop the Arc proxy with Ctrl+C when you're done.
 
 ## Next steps
 
