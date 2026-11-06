@@ -39,6 +39,7 @@ nav:
           - Deploy on AKS: preview/getting-started/deploy-on-aks.md
           - Deploy on EKS: preview/getting-started/deploy-on-eks.md
           - Deploy on GKE: preview/getting-started/deploy-on-gke.md
+          - Deploy on Azure Local: preview/getting-started/deploy-on-azure-local.md
           - Connecting to DocumentDB: preview/getting-started/connecting-to-documentdb.md
       - Architecture:
           - Overview: preview/architecture/overview.md

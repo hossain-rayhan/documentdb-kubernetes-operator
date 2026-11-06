@@ -32,7 +32,7 @@ Before installing the DocumentDB Kubernetes Operator, ensure you have the follow
 | Component | Purpose | When Needed |
 |-----------|---------|-------------|
 | **mongosh** | MongoDB shell for connecting to DocumentDB | Testing and administration |
-| **Azure CLI** | Azure resource management | Deploying on AKS |
+| **Azure CLI** | Azure resource management | Deploying on AKS or Azure Local |
 | **AWS CLI + eksctl** | AWS resource management | Deploying on EKS |
 | **gcloud CLI** | Google Cloud resource management | Deploying on GKE |
 
@@ -62,6 +62,7 @@ The operator runs on any conformant Kubernetes distribution (1.32+; 1.35+ with c
     - **[Azure Kubernetes Service (AKS)](https://github.com/documentdb/documentdb-kubernetes-operator/blob/main/documentdb-playground/aks-setup/README.md)** - Microsoft Azure
     - **[Amazon EKS](deploy-on-eks.md)** - Amazon Web Services
     - **Google Kubernetes Engine (GKE)** - Google Cloud Platform
+    - **[AKS on Azure Local](deploy-on-azure-local.md)** - your own datacenter or edge locations, managed through Azure Arc
 
 ### Resource requirements
 
